@@ -1,24 +1,3 @@
-"""
-udp_server.py — PC-side UDP server (v3).
-
-New in this version
-───────────────────
-  • Auto-detects the local LAN IP and prints it so you can paste it into
-    the ESP32 sketch — no more manual config.
-  • Detection filter: DETECT_COLORS / DETECT_CODES (or ServerConfig fields)
-    let you list exactly which colours and code types are reported/drawn.
-    Everything else is silently ignored.
-  • Handshake: on first contact from the ESP32 the server sends a CONFIG
-    packet (resolution, framerate, JPEG quality).  The ESP32 must ACK;
-    the server retransmits up to MAX_HS_RETRIES times.
-
-Run:
-    python udp_server.py
-
-Dependencies:
-    pip install opencv-python numpy pyzbar
-"""
-
 import socket
 import struct
 import threading
@@ -30,7 +9,6 @@ from dataclasses import dataclass, field
 from typing import Callable, List, Optional, Set, Tuple
 from collections import deque
 
-# ── Optional detector import ──────────────────────────────────────────────────
 try:
     from color_detector import VisionDetector, DetectionResult
     DETECTOR_AVAILABLE = True
@@ -357,8 +335,6 @@ class UDPVideoServer:
             f"[HS] ACK ✓ — ESP32 confirmed resolution={res} fps={fps} quality={qual}"
         )
 
-    # ── RX loop ───────────────────────────────────────────────────────────────
-
     def _rx_loop(self):
         while self._running:
             try:
@@ -388,8 +364,6 @@ class UDPVideoServer:
 
             self._bytes_rx += len(data)
             self._maybe_stats()
-
-    # ── Video ─────────────────────────────────────────────────────────────────
 
     def _handle_video(self, data: bytes):
         """
@@ -438,8 +412,6 @@ class UDPVideoServer:
         if self.on_frame:
             self.on_frame(frame)
 
-    # ── Sensor ────────────────────────────────────────────────────────────────
-
     def _handle_sensor(self, data: bytes):
         if len(data) < 18:
             return
@@ -453,14 +425,10 @@ class UDPVideoServer:
         if self.on_telemetry:
             self.on_telemetry(self._telemetry)
 
-    # ── Detection callback with filter ────────────────────────────────────────
-
     def _on_detection(self, result: "DetectionResult"):
-        # Apply colour filter
         if self._allowed_colors is not None:
             result.blobs = [b for b in result.blobs
                             if b.color.lower() in self._allowed_colors]
-        # Apply code-type filter
         if self._allowed_codes is not None:
             result.codes = [c for c in result.codes
                             if c.kind.upper() in self._allowed_codes]
@@ -481,14 +449,11 @@ class UDPVideoServer:
         if self.on_detection:
             self.on_detection(result)
 
-    # ── Display window ────────────────────────────────────────────────────────
-
     def _window_loop(self):
         WIN = "ESP32-CAM  |  Q / Esc to quit"
         cv2.namedWindow(WIN, cv2.WINDOW_NORMAL)
         cv2.resizeWindow(WIN, 800, 600)
 
-        # Build a placeholder shown while waiting for the ESP32
         ph = np.zeros((480, 640, 3), dtype=np.uint8)
         cv2.putText(ph, "Waiting for ESP32...",
                     (100, 200), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (80, 200, 80), 2)
@@ -509,12 +474,10 @@ class UDPVideoServer:
             display = ph.copy() if frame is None else frame
             h, w    = display.shape[:2]
 
-            # Semi-transparent top bar
             bar = display.copy()
             cv2.rectangle(bar, (0, 0), (w, 30), (15, 15, 15), -1)
             display = cv2.addWeighted(bar, 0.65, display, 0.35, 0)
 
-            # HUD labels
             hs_txt  = "HS:✓" if self.handshake_done else "HS:…"
             col_txt = ("col:ALL" if self._allowed_colors is None
                        else "col:" + ",".join(sorted(self._allowed_colors)))
@@ -544,8 +507,6 @@ class UDPVideoServer:
         cv2.destroyAllWindows()
         self._running = False
 
-    # ── Maintenance ───────────────────────────────────────────────────────────
-
     def _cleanup_loop(self):
         while self._running:
             time.sleep(1.0)
@@ -569,28 +530,15 @@ class UDPVideoServer:
             self._last_stats_time = now
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Entry point — the three "edit here" sections are all you normally need to
-# touch when tuning the system.
-# ─────────────────────────────────────────────────────────────────────────────
-
 if __name__ == "__main__":
 
-    # ── ① What to detect (filter) ────────────────────────────────────────────
-    #    Colours : any subset of ["red", "green", "blue"], or None = all
-    #    Codes   : e.g. ["QRCODE"], ["QRCODE", "CODE128"], or None = all
-    detect_colors = ["red", "green", "blue"]
+    detect_colors = ["red", "green", "blue", "yellow"]
     detect_codes  = ["QRCODE"]
 
-    # ── ② Camera settings sent to ESP32 at handshake ─────────────────────────
-    #    cam_resolution : 5=QVGA  8=VGA(default)  9=SVGA  13=UXGA
-    #    cam_framerate  : 1 – 30 fps
-    #    cam_quality    : 0 (best JPEG) – 63 (worst)  →  10-15 is balanced
     cam_resolution = 8
-    cam_framerate  = 60
+    cam_framerate  = 15
     cam_quality    = 18
 
-    # ── ③ Server settings ────────────────────────────────────────────────────
     cfg = ServerConfig(
         host           = "0.0.0.0",
         video_port     = 5005,
@@ -606,14 +554,13 @@ if __name__ == "__main__":
 
     server = UDPVideoServer(cfg)
 
-    # ── Optional: react to detections after filtering ────────────────────────
     def my_detection_hook(result):
         if result.blobs:
             biggest = max(result.blobs, key=lambda b: b.area)
             h, w    = result.frame.shape[:2]
             nx = (biggest.center[0] / w) - 0.5
             ny = (biggest.center[1] / h) - 0.5
-            # server.cmd_follow(nx, ny, 0.5)   # ← uncomment to drive
+            server.cmd_follow(nx, ny, 0.5)   # ← uncomment to drive
 
     server.on_detection = my_detection_hook
 
