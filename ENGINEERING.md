@@ -53,7 +53,7 @@ Colors are detected by converting frames to the **HSV (Hue, Saturation, Value)**
 | :--- | :--- | :--- | :--- |
 | **Red** | `0-8` & `170-179` | `0-8` & `170-179` | S > 100, V > 80 |
 | **Green** | `40` | `85` | S > 60, V > 60 |
-| **Blue** | `95` | `135` | S > 80, V > 50 |
+| **Yellow** | `18` | `35` | S > 100, V > 100 |
 
 #### Processing Pipeline:
 1. **Gaussian Blur:** 5x5 kernel to reduce high-frequency noise.
@@ -62,7 +62,10 @@ Colors are detected by converting frames to the **HSV (Hue, Saturation, Value)**
    - **Opening:** Removes small noise (erosion followed by dilation).
    - **Closing:** Fills small holes in detected blobs (dilation followed by erosion).
 4. **Contour Filtering:** Blobs smaller than **800 pixels** are ignored to prevent false positives from background noise.
-5. **Centroid Calculation:** Calculated via Image Moments ($M_{10}/M_{00}, M_{01}/M_{00}$).
+5. **Shape Classification:** Objects are classified as either **Cubes** or **Cylinders** based on their contour's circularity measure (circularity > 0.78 indicates a cylinder).
+6. **Distance Estimation:** The distance to the detected object in cm is estimated using an inverse-square area heuristic, calibrated with a pinhole camera model constant ($K_{DISTANCE} \approx 40000$).
+7. **Centroid Calculation:** Calculated via Image Moments ($M_{10}/M_{00}, M_{01}/M_{00}$).
+8. **Object Capping:** The `max_objects` parameters limits the number of detected color blobs per frame. The algorithm prioritizes objects with the largest bounding box area.
 
 ### Additional Detectors
 - **QR Codes:** Integrated via `pyzbar`. Supports various barcode types, primarily filtered for `QRCODE`.

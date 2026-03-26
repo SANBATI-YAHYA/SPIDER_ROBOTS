@@ -1,3 +1,4 @@
+import os
 import socket
 import struct
 import threading
@@ -28,11 +29,11 @@ log = logging.getLogger("UDPServer")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ① DETECTION FILTER  ← edit these two lines
-#    Colour names : "red"  "green"  "blue"  (keys in COLOR_RANGES)
+#    Colour names : "red"  "green"  "yellow"  (keys in COLOR_RANGES)
 #    Code types   : "QRCODE"  "CODE128"  "EAN13"  etc.  (pyzbar strings)
 #    Set to None  → allow everything in that category.
 # ─────────────────────────────────────────────────────────────────────────────
-DETECT_COLORS: Optional[List[str]] = ["red", "green", "blue"]   # or None
+DETECT_COLORS: Optional[List[str]] = ["red", "green", "yellow"]   # or None
 DETECT_CODES:  Optional[List[str]] = ["QRCODE"]                 # or None
 
 
@@ -116,6 +117,7 @@ class ServerConfig:
     # Detection filter (None = use module-level DETECT_* constants)
     detect_colors:   Optional[List[str]] = None
     detect_codes:    Optional[List[str]] = None
+    debug_log:       bool  = False
     # Camera parameters sent during handshake
     cam_resolution:  int = CAM_RESOLUTION
     cam_framerate:   int = CAM_FRAMERATE
@@ -167,6 +169,10 @@ class UDPVideoServer:
         # Auto-detect LAN IP
         self._local_ip = get_local_ip()
         log.info(f"Local LAN IP: {self._local_ip}")
+
+        if self.cfg.debug_log:
+            os.makedirs("debug_logs", exist_ok=True)
+            log.info("Debug logging enabled — saving payloads to debug_logs/")
 
         # ── Sockets ──────────────────────────────────────────────────────────
         self._rx_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -331,6 +337,11 @@ class UDPVideoServer:
         res, fps, qual = struct.unpack("BBB", data[:3])
         with self._hs_lock:
             self._hs_done = True
+
+        if self.cfg.debug_log:
+            with open("debug_logs/requests.txt", "a") as f:
+                f.write(f"[{time.time():.3f}] ACK Received: res={res} fps={fps} qual={qual}\n")
+
         log.info(
             f"[HS] ACK ✓ — ESP32 confirmed resolution={res} fps={fps} quality={qual}"
         )
@@ -345,6 +356,9 @@ class UDPVideoServer:
                 break
 
             if len(data) < 2:
+                if self.cfg.debug_log:
+                    with open("debug_logs/requests.txt", "a") as f:
+                        f.write(f"[{time.time():.3f}] TRUNCATED Received (<2 bytes) from {addr}\n")
                 continue
 
             if self._robot_addr is None:
@@ -361,6 +375,10 @@ class UDPVideoServer:
                 self._handle_sensor(data[2:])
             elif magic == MAGIC_ACK:
                 self._handle_ack(data[2:])
+            else:
+                if self.cfg.debug_log:
+                    with open("debug_logs/requests.txt", "a") as f:
+                        f.write(f"[{time.time():.3f}] UNKNOWN Received from {addr}: {data.hex()}\n")
 
             self._bytes_rx += len(data)
             self._maybe_stats()
@@ -371,6 +389,9 @@ class UDPVideoServer:
           seq_id(uint16) | chunk_id(uint8) | total_chunks(uint8) | JPEG bytes
         """
         if len(data) < 4:
+            if self.cfg.debug_log:
+                with open("debug_logs/requests.txt", "a") as f:
+                    f.write(f"[{time.time():.3f}] TRUNCATED VIDEO CHUNK (<4 bytes)\n")
             return
         seq_id, chunk_id, total_chunks = struct.unpack("!HBB", data[:4])
         payload = data[4:]
@@ -386,6 +407,13 @@ class UDPVideoServer:
             self._decode_and_process(jpeg)
 
     def _decode_and_process(self, jpeg: bytes):
+        if self.cfg.debug_log:
+            filename = f"debug_logs/frame_{self._frames_rx}.jpg"
+            with open(filename, "wb") as f:
+                f.write(jpeg)
+            with open("debug_logs/requests.txt", "a") as f:
+                f.write(f"[{time.time():.3f}] VIDEO Received: saved to {filename} ({len(jpeg)} bytes)\n")
+
         arr   = np.frombuffer(jpeg, dtype=np.uint8)
         frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
         if frame is None:
@@ -416,6 +444,11 @@ class UDPVideoServer:
         if len(data) < 18:
             return
         ts, batt, roll, pitch, yaw = struct.unpack("!fHfff", data[:18])
+        
+        if self.cfg.debug_log:
+            with open("debug_logs/requests.txt", "a") as f:
+                f.write(f"[{time.time():.3f}] SENSOR Received: ts={ts} batt={batt} roll={roll} pitch={pitch} yaw={yaw} extra={data[18:].hex()}\n")
+
         with self._telem_lock:
             self._telemetry = RobotTelemetry(
                 timestamp=ts, battery_mv=batt,
@@ -511,9 +544,27 @@ class UDPVideoServer:
         while self._running:
             time.sleep(1.0)
             now   = time.time()
-            stale = [k for k, v in self._partial_frames.items()
-                     if now - v["ts"] > FRAME_TIMEOUT]
-            for k in stale:
+            stale = []
+            for k, v in self._partial_frames.items():
+                if now - v["ts"] > FRAME_TIMEOUT:
+                    stale.append((k, v))
+            
+            for k, v in stale:
+                if self.cfg.debug_log:
+                    rcv_count = len(v["chunks"])
+                    tot_count = v["total"]
+                    
+                    with open("debug_logs/requests.txt", "a") as f:
+                        f.write(f"[{time.time():.3f}] INCOMPLETE FRAME Dropped: seq={k} missing {tot_count - rcv_count}/{tot_count} chunks\n")
+                    
+                    filename = f"debug_logs/incomplete_frame_{k}_part.bin"
+                    with open(filename, "wb") as f:
+                        for i in range(tot_count):
+                            if i in v["chunks"]:
+                                f.write(v["chunks"][i])
+                            else:
+                                f.write(b"<MISSING>")
+
                 del self._partial_frames[k]
 
     def _maybe_stats(self):
@@ -532,7 +583,7 @@ class UDPVideoServer:
 
 if __name__ == "__main__":
 
-    detect_colors = ["red", "green", "blue", "yellow"]
+    detect_colors = ["red", "green", "yellow"]
     detect_codes  = ["QRCODE"]
 
     cam_resolution = 8
@@ -547,6 +598,7 @@ if __name__ == "__main__":
         run_detector   = True,
         detect_colors  = detect_colors,
         detect_codes   = detect_codes,
+        debug_log      = False,
         cam_resolution = cam_resolution,
         cam_framerate  = cam_framerate,
         cam_quality    = cam_quality,
