@@ -4,15 +4,14 @@
 #include <WiFiUdp.h>
 
 // USER CONFIG
-const char *WIFI_SSID = "Helios";
+const char *WIFI_SSID = "Nyx";
 const char *WIFI_PASSWORD = "a123456a";
-const char *SERVER_IP = "10.221.49.10";
+const char *SERVER_IP = "10.231.28.10";
 const uint16_t VIDEO_PORT = 5005;
 const uint16_t CAM_PORT = 5007;
 
 const uint32_t FRAME_INTERVAL_MS = 66;
-bool ENABLE_STREAM =
-    true; // Set to false to stop continuous streaming and save bandwidth
+bool ENABLE_STREAM = true;
 
 // Protocol constants
 const uint8_t MAGIC_VIDEO[2] = {0xAA, 0xBB};
@@ -40,16 +39,21 @@ static const framesize_t FRAMESIZE_MAP[] = {
 static const uint8_t FRAMESIZE_MAP_LEN =
     sizeof(FRAMESIZE_MAP) / sizeof(FRAMESIZE_MAP[0]);
 
-static uint8_t udpBuf[CHUNK_SIZE + 8];
-
 volatile uint32_t g_frameIntervalMs = FRAME_INTERVAL_MS;
 
 const uint8_t CMD_SCAN_REFLECTIONS = 0x06;
 
+// Non-blocking Flash State Machine
+enum ScanState { SCAN_IDLE, SCAN_TURN_ON, SCAN_DISCARD, SCAN_CAPTURE };
+ScanState g_scanState = SCAN_IDLE;
+uint32_t g_scanTimer = 0;
+
 const size_t CHUNK_SIZE = 1400;
+static uint8_t udpBuf[CHUNK_SIZE + 8];
 
 // Flash pin
 #define FLASH_GPIO_NUM 4
+#define FLASH_LEDC_CHANNEL 4
 
 // Camera pins
 #define PWDN_GPIO_NUM 32
@@ -96,13 +100,12 @@ bool initCamera() {
   config.pixel_format = PIXFORMAT_JPEG;
 
   if (psramFound()) {
-    config.frame_size = FRAMESIZE_QVGA; // Lowered from VGA to save PSRAM
-    config.jpeg_quality = 12; // 10-63 lower number means higher quality
-    config.fb_count = 1;      // Lowered to 1 to minimize memory footprint
+    config.frame_size = FRAMESIZE_QVGA;
+    config.jpeg_quality = 12;
+    config.fb_count = 1;
     config.fb_location = CAMERA_FB_IN_PSRAM;
   } else {
-    config.frame_size =
-        FRAMESIZE_QQVGA; // Use smallest resolution for no-PSRAM fallback
+    config.frame_size = FRAMESIZE_QQVGA;
     config.jpeg_quality = 12;
     config.fb_count = 1;
     config.fb_location = CAMERA_FB_IN_PSRAM;
@@ -186,7 +189,8 @@ void receiveCommands() {
     return;
 
   uint8_t *buf = udpBuf;
-  int len = udp.read(buf, sizeof(buf));
+  int len =
+      udp.read(buf, sizeof(udpBuf)); // Fixed: sizeof(udpBuf) not sizeof(buf)
   if (len < 2)
     return;
 
@@ -206,32 +210,22 @@ void receiveCommands() {
 
   if (cmdId == CMD_SCAN_REFLECTIONS) {
     Serial.println("[CMD] SCAN_REFLECTIONS");
-
-    digitalWrite(FLASH_GPIO_NUM, LOW);
-    camera_fb_t *fb_off = esp_camera_fb_get();
-    if (fb_off) {
-      sendFrame(fb_off->buf, fb_off->len, 0);
-      esp_camera_fb_return(fb_off);
+    if (g_scanState == SCAN_IDLE) {
+      g_scanState = SCAN_TURN_ON;
     }
-
-    digitalWrite(FLASH_GPIO_NUM, HIGH);
-    delay(300); // Wait long enough for flash to fire and sensor to capture it
-    camera_fb_t *fb_on = esp_camera_fb_get();
-    if (fb_on) {
-      sendFrame(fb_on->buf, fb_on->len, 1);
-      esp_camera_fb_return(fb_on);
-    }
-    digitalWrite(FLASH_GPIO_NUM, LOW);
   }
 }
 
 void setup() {
   Serial.begin(115200);
 
-  // Explicitly un-hold the RTC IO which can sometimes lock the flash line
+  // Un-hold GPIO4 in case it was held by deep sleep
   rtc_gpio_hold_dis(GPIO_NUM_4);
-  pinMode(FLASH_GPIO_NUM, OUTPUT);
-  digitalWrite(FLASH_GPIO_NUM, LOW);
+
+  // Init flash via LEDC PWM (v3 API) — no pinMode needed before
+  // ledcAttachChannel
+  ledcAttachChannel(FLASH_GPIO_NUM, 5000, 8, FLASH_LEDC_CHANNEL);
+  ledcWrite(FLASH_GPIO_NUM, 0); // Off
 
   if (!initCamera()) {
     while (true)
@@ -239,9 +233,12 @@ void setup() {
   }
 
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  Serial.print("[WiFi] Connecting");
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
+    Serial.print(".");
   }
+  Serial.printf("\n[WiFi] Connected: %s\n", WiFi.localIP().toString().c_str());
 
   udp.begin(CAM_PORT);
 }
@@ -250,7 +247,39 @@ void loop() {
   static uint32_t lastFrameMs = 0;
   uint32_t now = millis();
 
-  if (ENABLE_STREAM && (now - lastFrameMs >= g_frameIntervalMs)) {
+  // --- Non-Blocking Flash Sequence ---
+  if (g_scanState == SCAN_TURN_ON) {
+    ledcWrite(FLASH_GPIO_NUM, 40); // 40/255 duty — bright but brownout-safe
+    g_scanTimer = now;
+    g_scanState = SCAN_DISCARD;
+
+  } else if (g_scanState == SCAN_DISCARD) {
+    // Wait ~50ms then discard the partial rolling-shutter frame
+    if (now - g_scanTimer > 50) {
+      camera_fb_t *fb = esp_camera_fb_get();
+      if (fb)
+        esp_camera_fb_return(fb);
+      g_scanTimer = now;
+      g_scanState = SCAN_CAPTURE;
+    }
+
+  } else if (g_scanState == SCAN_CAPTURE) {
+    // Wait another ~50ms then grab the fully illuminated frame
+    if (now - g_scanTimer > 50) {
+      camera_fb_t *fb = esp_camera_fb_get();
+      if (fb) {
+        sendFrame(fb->buf, fb->len, 1);
+        esp_camera_fb_return(fb);
+      }
+      ledcWrite(FLASH_GPIO_NUM, 0); // Flash off
+      g_scanState = SCAN_IDLE;
+      lastFrameMs = now; // Prevent immediate normal-stream frame
+    }
+  }
+
+  // --- Normal Streaming ---
+  if (ENABLE_STREAM && g_scanState == SCAN_IDLE &&
+      (now - lastFrameMs >= g_frameIntervalMs)) {
     lastFrameMs = now;
     camera_fb_t *fb = esp_camera_fb_get();
     if (fb) {

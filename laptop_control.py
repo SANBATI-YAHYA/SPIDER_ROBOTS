@@ -28,9 +28,9 @@ log = logging.getLogger("LaptopControl")
 DETECT_COLORS: Optional[List[str]] = ["red", "green", "yellow"]
 DETECT_CODES:  Optional[List[str]] = ["QRCODE"]
 
-CAM_RESOLUTION: int = 8    
-CAM_FRAMERATE:  int = 15   
-CAM_QUALITY:    int = 12   
+CAM_RESOLUTION: int = 8  
+CAM_FRAMERATE:  int = 30
+CAM_QUALITY:    int = 18
 
 MAGIC_VIDEO     = b'\xAA\xBB'
 MAGIC_CMD       = b'\xCC\xDD'
