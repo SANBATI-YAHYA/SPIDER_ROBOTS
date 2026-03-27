@@ -53,6 +53,8 @@ CMD_SCAN_REFLECTIONS = 0x06
 CMD_SET_FLASH_N = 0x10
 CMD_ESTOP     = 0xFF
 
+ANNOUNCE_PORT = 4999   # master broadcasts "QUAD:<ip>" here every 3 s
+
 def get_local_ip() -> str:
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -214,6 +216,12 @@ class LaptopControlServer:
         self.on_telemetry: Optional[Callable] = None
         self.on_detection: Optional[Callable] = None
 
+        self._discovered_master_ip: Optional[str] = None
+        self._discover_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self._discover_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._discover_sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        self._discover_sock.settimeout(1.0)
+
         self._frames_rx       = 0
         self._bytes_rx        = 0
         self._display_fps     = 0.0
@@ -229,11 +237,12 @@ class LaptopControlServer:
         self._rx_video.bind((self.cfg.host, self.cfg.video_port))
         self._rx_telem.bind((self.cfg.host, self.cfg.master_port))
         log.info(f"Server ready — {self.cfg.host}")
-        
+
         self._running = True
-        threading.Thread(target=self._rx_video_loop, daemon=True, name="RX-Video").start()
-        threading.Thread(target=self._rx_telem_loop, daemon=True, name="RX-Telem").start()
-        threading.Thread(target=self._cleanup_loop,  daemon=True, name="Cleanup").start()
+        threading.Thread(target=self._rx_video_loop,  daemon=True, name="RX-Video").start()
+        threading.Thread(target=self._rx_telem_loop,  daemon=True, name="RX-Telem").start()
+        threading.Thread(target=self._cleanup_loop,   daemon=True, name="Cleanup").start()
+        threading.Thread(target=self._discovery_loop, daemon=True, name="Discovery").start()
 
         if self.cfg.show_window:
             self._window_loop()
@@ -249,6 +258,7 @@ class LaptopControlServer:
         self._running = False
         self._rx_video.close()
         self._rx_telem.close()
+        self._discover_sock.close()
         log.info("Server stopped.")
 
     def send_cam_command(self, cmd_id: int, payload: bytes = b'') -> bool:
@@ -279,6 +289,42 @@ class LaptopControlServer:
     def cmd_set_speed(self, speed):       self.send_master_command(CMD_SET_SPEED, struct.pack("!f",   speed))
     def cmd_scan_reflections(self):       self.send_cam_command(CMD_SCAN_REFLECTIONS)
     def cmd_set_flash_n(self, n: int):    self.send_cam_command(CMD_SET_FLASH_N, struct.pack("!B", n))
+
+    # ── Discovery ────────────────────────────────────────────────────────────
+
+    @property
+    def master_ip(self) -> Optional[str]:
+        """IP of the ESP32 master once discovered, else None."""
+        return self._discovered_master_ip
+
+    def _discovery_loop(self):
+        """Listen for 'QUAD:<ip>' broadcasts from master.ino on port 4999."""
+        try:
+            self._discover_sock.bind(("0.0.0.0", ANNOUNCE_PORT))
+        except OSError as e:
+            log.warning(f"[Discovery] Cannot bind port {ANNOUNCE_PORT}: {e}")
+            return
+
+        while self._running:
+            try:
+                data, addr = self._discover_sock.recvfrom(64)
+                msg = data.decode(errors="ignore").strip()
+                if msg.startswith("QUAD:"):
+                    ip = msg[5:]
+                    if ip != self._discovered_master_ip:
+                        self._discovered_master_ip = ip
+                        log.info("")
+                        log.info(f"  ╔══════════════════════════════════════╗")
+                        log.info(f"  ║  MASTER ESP32 FOUND                 ║")
+                        log.info(f"  ║  IP  : {ip:<29}║")
+                        log.info(f"  ║  CMD : robot_ctrl.py --ip {ip:<12}║")
+                        log.info(f"  ║  UI  : http://{ip}/ {'':>13}║")
+                        log.info(f"  ╚══════════════════════════════════════╝")
+                        log.info("")
+            except socket.timeout:
+                continue
+            except OSError:
+                break
 
     def _send_handshake(self):
         pkt = MAGIC_HANDSHAKE + struct.pack("BBB", self.cfg.cam_resolution, self.cfg.cam_framerate, self.cfg.cam_quality)
