@@ -7,8 +7,9 @@ import numpy as np
 import cv2
 import logging
 from dataclasses import dataclass, field
-from typing import Callable, List, Optional, Set, Tuple
+from typing import Callable, Dict, List, Optional, Set, Tuple
 from collections import deque
+from math import hypot
 
 try:
     from vision_engine import VisionDetector, DetectionResult
@@ -88,6 +89,81 @@ class ServerConfig:
     cam_framerate:   int = CAM_FRAMERATE
     cam_quality:     int = CAM_QUALITY
 
+# ── ArUco ↔ Color pairing store ─────────────────────────────────────────────
+class ArucoColorStore:
+    """
+    Stores unique (aruco_id → color) pairs.
+
+    Once an ArUco ID is bound to a color the binding is permanent — if the
+    same marker is later seen near a different color the original mapping is
+    kept.  Call ``register(result)`` every frame; it finds the nearest color
+    blob to each visible ArUco marker and records the pair.
+
+    Parameters
+    ----------
+    max_dist_px : int
+        Maximum centroid-to-centroid distance (pixels) for a blob to be
+        considered "co-located" with a marker.  Tune per your camera FOV.
+    """
+
+    def __init__(self, max_dist_px: int = 120):
+        self.max_dist_px = max_dist_px
+        self._pairs: dict[int, str] = {}       # aruco_id → color
+        self._lock  = threading.Lock()
+
+    @property
+    def pairs(self) -> dict:
+        """Snapshot of current {aruco_id: color} mappings."""
+        with self._lock:
+            return dict(self._pairs)
+
+    def register(self, result: "DetectionResult") -> list[tuple[int, str]]:
+        """
+        Inspect a DetectionResult and pair any ArUco markers with nearby
+        color blobs.  Returns a list of (aruco_id, color) tuples that were
+        **newly** registered this call.
+        """
+        if not result.aruco or not result.blobs:
+            return []
+
+        new_pairs: list[tuple[int, str]] = []
+
+        for marker in result.aruco:
+            mx, my = marker.center
+
+            # find the closest blob within max_dist_px
+            best_blob = None
+            best_dist = float("inf")
+            for blob in result.blobs:
+                d = hypot(blob.center[0] - mx, blob.center[1] - my)
+                if d < best_dist:
+                    best_dist = d
+                    best_blob = blob
+
+            if best_blob is None or best_dist > self.max_dist_px:
+                continue
+
+            with self._lock:
+                if marker.id not in self._pairs:
+                    self._pairs[marker.id] = best_blob.color
+                    new_pairs.append((marker.id, best_blob.color))
+                    log.info(
+                        f"[ArucoColorStore] NEW pair → ArUco #{marker.id} = '{best_blob.color}' "
+                        f"(dist={best_dist:.1f}px)"
+                    )
+                # else: already bound — silently skip
+
+        return new_pairs
+
+    def get(self, aruco_id: int) -> Optional[str]:
+        """Return the color bound to aruco_id, or None."""
+        with self._lock:
+            return self._pairs.get(aruco_id)
+
+    def __repr__(self) -> str:
+        return f"ArucoColorStore({self._pairs})"
+
+
 class LaptopControlServer:
     def __init__(self, config: ServerConfig = ServerConfig()):
         self.cfg      = config
@@ -131,6 +207,8 @@ class LaptopControlServer:
         self.detector = None
         if config.run_detector and DETECTOR_AVAILABLE:
             self.detector = VisionDetector(min_area=800, draw_overlay=True, on_detection=self._on_detection)
+
+        self.aruco_color_store = ArucoColorStore(max_dist_px=120)
 
         self.on_frame:     Optional[Callable] = None
         self.on_telemetry: Optional[Callable] = None
@@ -315,13 +393,16 @@ class LaptopControlServer:
         if self._allowed_colors is not None: result.blobs = [b for b in result.blobs if b.color.lower() in self._allowed_colors]
         if self._allowed_codes is not None:  result.codes = [c for c in result.codes if c.kind.upper() in self._allowed_codes]
 
+        # Persist unique aruco-color pairs via ArucoColorStore (first-seen wins)
+        self.aruco_color_store.register(result)
+
         if result.annotated is not None:
             with self._frame_lock:
                 self._display_frame = result.annotated
         if self.on_detection: self.on_detection(result)
 
     def _window_loop(self):
-        WIN = "Laptop | Q=Quit S=1Scan F=AutoFlash +/-=Rate"
+        WIN = "Laptop | P=Pic Q=Quit S=1Scan F=Flash +/-=Rate"
         cv2.namedWindow(WIN, cv2.WINDOW_NORMAL)
         cv2.resizeWindow(WIN, 800, 600)
         ph = np.zeros((480, 640, 3), dtype=np.uint8)
@@ -364,6 +445,16 @@ class LaptopControlServer:
                     self._auto_flash_n = curr_n - 1
                     log.info(f"Auto-flash every {self._auto_flash_n} frames")
                     self.cmd_set_flash_n(self._auto_flash_n)
+            elif key in (ord('p'), ord('P')):
+                with self._frame_lock:
+                    pic = self._latest_raw.copy() if getattr(self, '_latest_raw', None) is not None else None
+                if pic is not None:
+                    os.makedirs("debug_logs", exist_ok=True)
+                    fname = os.path.join("debug_logs", f"cam_debug_{int(time.time()*1000)}.jpg")
+                    cv2.imwrite(fname, pic)
+                    log.info(f"Saved picture to {fname}")
+                else:
+                    log.warning("No picture available to save yet.")
             time.sleep(0.008)
 
         cv2.destroyAllWindows()
@@ -388,12 +479,21 @@ if __name__ == "__main__":
     server = LaptopControlServer(cfg)
 
     def my_detection_hook(result):
+        # log any newly formed ArUco↔color pairs
+        new = server.aruco_color_store.register(result)
+        for aid, color in new:
+            log.info(f"Stored pair → ArUco #{aid} ↔ {color}  | all pairs: {server.aruco_color_store.pairs}")
+
         if result.blobs:
             biggest = max(result.blobs, key=lambda b: b.area)
-            h, w    = result.frame.shape[:2]
-            nx = (biggest.center[0] / w) - 0.5
-            ny = (biggest.center[1] / h) - 0.5
-            # server.cmd_follow(nx, ny, 0.5)
+            if biggest.color == "red":
+                server.cmd_turn(1.0)
+            elif biggest.color == "yellow":
+                server.cmd_turn(-1.0)
+            elif biggest.color == "green":
+                server.cmd_move(1.0, 0.0, 0.0)
+        else:
+            server.cmd_stop()
 
     server.on_detection = my_detection_hook
     log.info("Server starting — waiting for ESP32 devices...")

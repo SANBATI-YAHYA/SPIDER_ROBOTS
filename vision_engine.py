@@ -10,7 +10,7 @@ import cv2
 import numpy as np
 import logging
 from dataclasses import dataclass, field
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 try:
     from pyzbar import pyzbar
@@ -109,6 +109,10 @@ class ArUcoResult:
     bbox: Tuple[int, int, int, int]
 
 
+# Max pixel distance between a blob center and ArUco center to form a pair.
+ARUCO_PAIR_MAX_DIST: float = 200.0
+
+
 @dataclass
 class DetectionResult:
     frame: np.ndarray
@@ -117,6 +121,8 @@ class DetectionResult:
     aruco: List[ArUcoResult] = field(default_factory=list)
     annotated: Optional[np.ndarray] = None
     process_ms: float = 0.0
+    # Pairs formed this frame: (aruco_id, color) — may contain duplicates across frames.
+    aruco_color_pairs: List[Tuple[int, str]] = field(default_factory=list)
 
 
 # ── Detector ─────────────────────────────────────────────────────────────────
@@ -203,14 +209,17 @@ class VisionDetector:
             blobs.sort(key=lambda b: b.area, reverse=True)
             blobs = blobs[:self.max_objects]
 
+        pairs = self._pair_blobs_to_aruco(blobs, arucos)
+
         elapsed = (cv2.getTickCount() - t0) / cv2.getTickFrequency() * 1000.0
         result = DetectionResult(
             frame=frame, blobs=blobs, codes=codes,
             aruco=arucos, process_ms=elapsed,
+            aruco_color_pairs=pairs,
         )
 
         if self.draw_overlay:
-            result.annotated = self._draw(frame.copy(), blobs, codes, arucos)
+            result.annotated = self._draw(frame.copy(), blobs, codes, arucos, pairs)
 
         if self.on_detection:
             self.on_detection(result)
@@ -314,7 +323,34 @@ class VisionDetector:
             ))
         return codes
 
-    def _draw(self, frame: np.ndarray, blobs, codes, arucos) -> np.ndarray:
+    def _pair_blobs_to_aruco(
+        self,
+        blobs: List[ColorBlob],
+        arucos: List[ArUcoResult],
+    ) -> List[Tuple[int, str]]:
+        """Return (aruco_id, color) for each blob whose nearest ArUco is within ARUCO_PAIR_MAX_DIST."""
+        if not blobs or not arucos:
+            return []
+        pairs: List[Tuple[int, str]] = []
+        for blob in blobs:
+            bx, by = blob.center
+            best_dist = float("inf")
+            best_id   = -1
+            for a in arucos:
+                ax, ay = a.center
+                d = ((bx - ax) ** 2 + (by - ay) ** 2) ** 0.5
+                if d < best_dist:
+                    best_dist = d
+                    best_id   = a.id
+            if best_dist <= ARUCO_PAIR_MAX_DIST:
+                pairs.append((best_id, blob.color))
+        return pairs
+
+    def _draw(self, frame: np.ndarray, blobs, codes, arucos,
+              pairs: Optional[List[Tuple[int, str]]] = None) -> np.ndarray:
+        # build a quick lookup: aruco_id → color for overlay
+        pair_map: Dict[int, str] = {aid: col for aid, col in (pairs or [])}
+
         for b in blobs:
             c = DRAW_COLOR.get(b.color, (200, 200, 200))
             x, y, w, h = b.bbox
@@ -336,7 +372,9 @@ class VisionDetector:
             c = DRAW_COLOR["aruco"]
             x, y, w, h = a.bbox
             cv2.rectangle(frame, (x, y), (x + w, y + h), c, 2)
-            cv2.putText(frame, f"ID:{a.id}", (x, y - 10),
+            paired_col = pair_map.get(a.id)
+            label = f"ID:{a.id}" + (f"={paired_col}" if paired_col else "")
+            cv2.putText(frame, label, (x, y - 10),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, c, 1)
 
         return frame
