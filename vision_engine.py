@@ -74,6 +74,7 @@ DRAW_COLOR = {
     "yellow": (0, 220, 220),
     "code":   (255, 200, 0),
     "aruco":  (0, 255, 255),
+    "reflection": (255, 100, 255),
 }
 
 
@@ -339,6 +340,73 @@ class VisionDetector:
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, c, 1)
 
         return frame
+
+    def process_reflections(self, diff: np.ndarray, original_frame: np.ndarray) -> DetectionResult:
+        """
+        Process the subtracted image (flash_on - flash_off) to find strong reflections.
+        Classifies objects as cylinders (vertical stripes) or cubes (flat/wider reflections).
+        """
+        t0 = cv2.getTickCount()
+        
+        gray_diff = cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY)
+        _, mask = cv2.threshold(gray_diff, 80, 255, cv2.THRESH_BINARY)
+        
+        cv2.morphologyEx(mask, cv2.MORPH_OPEN, self._morph_kernel, dst=mask)
+        cv2.morphologyEx(mask, cv2.MORPH_CLOSE, self._morph_kernel, dst=mask)
+        
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        blobs = []
+        fh, fw = original_frame.shape[:2]
+        total_area = fh * fw
+
+        for cnt in contours:
+            area = cv2.contourArea(cnt)
+            if area < self.min_area * 0.2: # Reflections can be smaller than the whole object
+                continue
+                
+            x, y, w, h = cv2.boundingRect(cnt)
+            aspect_ratio = float(h) / float(max(w, 1))
+            
+            # Cylinders create vertical bright stripes (tall and narrow)
+            # Cubes have flatter or wider reflections
+            shape = "cylinder (refl)" if aspect_ratio > 1.8 else "cube (refl)"
+            
+            M = cv2.moments(cnt)
+            if M["m00"] == 0:
+                continue
+            cx = int(M["m10"] / M["m00"])
+            cy = int(M["m01"] / M["m00"])
+            
+            dist = estimate_distance_cm(area * 3) # Roughly adjusting area since reflection is smaller
+            
+            blobs.append(ColorBlob(
+                color="reflection",
+                color_id=99,
+                shape=shape,
+                center=(cx, cy),
+                norm_x=cx / fw,
+                norm_y=cy / fh,
+                area=area,
+                area_pct=(area / total_area) * 100.0,
+                bbox=(x, y, w, h),
+                distance_cm=dist,
+            ))
+            
+        elapsed = (cv2.getTickCount() - t0) / cv2.getTickFrequency() * 1000.0
+        result = DetectionResult(
+            frame=original_frame, 
+            blobs=blobs, 
+            process_ms=elapsed,
+        )
+
+        if self.draw_overlay:
+            result.annotated = self._draw(original_frame.copy(), blobs, [], [])
+
+        if self.on_detection:
+            self.on_detection(result)
+
+        return result
 
 
 if __name__ == "__main__":
