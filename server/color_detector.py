@@ -1,5 +1,5 @@
 """
-color_detector.py — Optimized computer vision pipeline for SRG-Comp26.
+color_detector.py - Optimized computer vision pipeline for SRG-Comp26.
 
 Detects colored objects (cubes/cylinders), QR codes, and ArUco markers
 in JPEG frames from ESP32-CAM. Pre-allocates buffers, reuses grayscale
@@ -20,12 +20,12 @@ except ImportError:
 
 log = logging.getLogger("Vision")
 
-# ── Distance estimation ──────────────────────────────────────────────────────
+# Distance estimation
 # Tuned for a ~6cm object (cube/cylinder) in a typical hackathon setup.
 # K = perceived_pixels_area_at_known_distance * known_distance²
 # Adjust K_DISTANCE to match your actual objects + camera focal length.
 # A value of ~40000 works for a 6cm object at ~40cm with ESP32-CAM resolution.
-K_DISTANCE: float = 40_000.0   # px²·cm²  — tune this per setup
+K_DISTANCE: float = 40_000.0   # px²·cm² - tune this per setup
 
 def estimate_distance_cm(area_px: float) -> Optional[float]:
     """Returns estimated distance in cm from bbox area (px²), or None if unreliable."""
@@ -35,11 +35,11 @@ def estimate_distance_cm(area_px: float) -> Optional[float]:
     return round(d, 1)
 
 
-# ── Shape classifier ─────────────────────────────────────────────────────────
+# Shape classifier
 def classify_shape(cnt: np.ndarray) -> str:
     """
     Returns 'cylinder' or 'cube' based on contour shape.
-    Circularity > 0.78 → cylinder, else → cube.
+    Circularity > 0.78 -> cylinder, else -> cube.
     """
     area = cv2.contourArea(cnt)
     if area == 0:
@@ -51,8 +51,8 @@ def classify_shape(cnt: np.ndarray) -> str:
     return "cylinder" if circularity > 0.78 else "cube"
 
 
-# ── Color maps ───────────────────────────────────────────────────────────────
-# color name → protocol ObjColor enum value
+# Color maps
+# color name -> protocol ObjColor enum value
 COLOR_ID_MAP = {"red": 0, "green": 1, "yellow": 2}
 
 COLOR_RANGES = {
@@ -61,10 +61,10 @@ COLOR_RANGES = {
         (np.array([170, 100, 80], dtype=np.uint8), np.array([179, 255, 255], dtype=np.uint8)),
     ],
     "green": [
-        (np.array([45, 65, 30], dtype=np.uint8), np.array([85, 255, 255], dtype=np.uint8)),
+        (np.array([40, 60, 60], dtype=np.uint8), np.array([85, 255, 255], dtype=np.uint8)),
     ],
     "yellow": [
-        (np.array([22, 55, 50], dtype=np.uint8), np.array([34, 255, 255], dtype=np.uint8)),
+        (np.array([18, 100, 100], dtype=np.uint8), np.array([35, 255, 255], dtype=np.uint8)),
     ],
 }
 
@@ -78,7 +78,7 @@ DRAW_COLOR = {
 }
 
 
-# ── Dataclasses ──────────────────────────────────────────────────────────────
+# Dataclasses
 @dataclass(slots=True)
 class ColorBlob:
     color: str
@@ -121,11 +121,11 @@ class DetectionResult:
     aruco: List[ArUcoResult] = field(default_factory=list)
     annotated: Optional[np.ndarray] = None
     process_ms: float = 0.0
-    # Pairs formed this frame: (aruco_id, color) — may contain duplicates across frames.
+    # Pairs formed this frame: (aruco_id, color) - may contain duplicates across frames.
     aruco_color_pairs: List[Tuple[int, str]] = field(default_factory=list)
 
 
-# ── Detector ─────────────────────────────────────────────────────────────────
+# Detector
 class VisionDetector:
     """
     Optimized vision pipeline with color detection, shape classification,
@@ -145,7 +145,7 @@ class VisionDetector:
         morph_ksize: int = 7,
         draw_overlay: bool = True,
         detect_scale: float = 1.0,
-        max_objects: int = 10,          # ← limit detections per frame
+        max_objects: int = 10,
         on_detection: Optional[Callable[["DetectionResult"], None]] = None,
         aruco_dict: int = cv2.aruco.DICT_4X4_50,
     ):
@@ -233,7 +233,7 @@ class VisionDetector:
         scaled_min = self.min_area * (scale * scale) if scale < 1.0 else self.min_area
 
         for name, ranges in COLOR_RANGES.items():
-            # build mask — handle multi-range colors (e.g. red wraps hue)
+            # build mask - handle multi-range colors (e.g. red wraps hue)
             self._mask[:] = 0
             if len(ranges) == 1:
                 cv2.inRange(hsv, ranges[0][0], ranges[0][1], dst=self._mask)
@@ -348,7 +348,7 @@ class VisionDetector:
 
     def _draw(self, frame: np.ndarray, blobs, codes, arucos,
               pairs: Optional[List[Tuple[int, str]]] = None) -> np.ndarray:
-        # build a quick lookup: aruco_id → color for overlay
+        # build a quick lookup: aruco_id -> color for overlay
         pair_map: Dict[int, str] = {aid: col for aid, col in (pairs or [])}
 
         for b in blobs:
@@ -400,7 +400,7 @@ class VisionDetector:
 
         for cnt in contours:
             area = cv2.contourArea(cnt)
-            if area < self.min_area * 0.2: # Reflections can be smaller than the whole object
+            if area < self.min_area * 0.2:  # Reflections can be smaller than the whole object
                 continue
                 
             x, y, w, h = cv2.boundingRect(cnt)
@@ -416,7 +416,7 @@ class VisionDetector:
             cx = int(M["m10"] / M["m00"])
             cy = int(M["m01"] / M["m00"])
             
-            dist = estimate_distance_cm(area * 3) # Roughly adjusting area since reflection is smaller
+            dist = estimate_distance_cm(area * 3)  # Roughly adjusting area since reflection is smaller
             
             blobs.append(ColorBlob(
                 color="reflection",

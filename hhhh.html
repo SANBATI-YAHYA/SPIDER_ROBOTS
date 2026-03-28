@@ -3,126 +3,116 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Eagles Controller</title>
+  <title>Team Eagles Controller</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
       min-height: 100vh;
       display: flex; flex-direction: column;
       align-items: center; justify-content: center;
-      background: #0d0d0d; color: #e8e8e8;
-      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-    }
-    .container {
-      background: #1a1a1a;
-      padding: 2rem;
-      border-radius: 15px;
-      box-shadow: 0 0 20px rgba(0, 144, 54, 0.2);
-      border: 1px solid #009036;
-      text-align: center;
+      background: linear-gradient(135deg, #0a1f12 0%, #0d2d18 100%);
+      color: #e8e8e8;
+      font-family: 'Segoe UI', 'Courier New', monospace;
     }
     h1 { 
-      font-size: 1.8rem; 
-      letter-spacing: 0.1em; 
+      font-size: 2rem; 
+      letter-spacing: 0.15em; 
       margin-bottom: 1.5rem; 
-      color: #009036; 
-      display: flex; align-items: center; justify-content: center; gap: 10px;
+      color: #009036;
+      text-shadow: 0 0 10px rgba(0, 144, 54, 0.5);
+      font-weight: 700;
+    }
+    .section-label {
+      font-size: 0.68rem; color: #009036;
+      letter-spacing: 0.12em; text-align: center;
+      margin: 1rem 0 0.5rem;
+      font-weight: 600;
     }
     .grid {
       display: grid;
       grid-template-columns: 1fr 1fr 1fr;
-      gap: 12px;
-      width: 300px;
-    }
-    .label {
-      grid-column: span 3;
-      font-size: 0.75rem;
-      color: #009036;
-      text-align: center;
-      margin: 1rem 0 0.5rem 0;
-      text-transform: uppercase;
-      font-weight: bold;
-      opacity: 0.7;
+      gap: 0.8rem;
+      width: 330px;
+      margin-bottom: 0.5rem;
     }
     button {
-      padding: 1.2rem 0.5rem; 
-      font-size: 0.9rem; 
-      font-weight: 600;
+      padding: 1rem 0.4rem; 
+      font-size: 0.85rem; 
+      font-family: inherit;
       border: 2px solid #009036; 
-      border-radius: 8px;
-      background: transparent; 
+      border-radius: 6px;
+      background: rgba(0, 144, 54, 0.1);
       color: #009036;
       cursor: pointer; 
+      letter-spacing: 0.05em;
       transition: all 0.2s ease;
+      font-weight: 600;
     }
-    button:active {
-      transform: scale(0.95);
-      background: #009036;
-      color: #0d0d0d;
+    button:hover { 
+      background: #009036; 
+      color: #ffffff;
+      box-shadow: 0 0 12px rgba(0, 144, 54, 0.6);
+      transform: translateY(-2px);
     }
-    button.special {
-      background: rgba(0, 144, 54, 0.1);
-    }
-    button.stop {
-      border-color: #ff4444;
+    button:active { transform: translateY(0); }
+    button.danger  { 
+      border-color: #ff4444; 
       color: #ff4444;
+      background: rgba(255, 68, 68, 0.1);
     }
-    button.stop:active {
-      background: #ff4444;
-      color: white;
+    button.danger:hover { 
+      background: #ff4444; 
+      color: #ffffff;
+      box-shadow: 0 0 12px rgba(255, 68, 68, 0.6);
     }
-    button.wide { grid-column: span 3; }
+    button.blue    { 
+      border-color: #ffcc00; 
+      color: #ffcc00;
+      background: rgba(255, 204, 0, 0.1);
+    }
+    button.blue:hover { 
+      background: #ffcc00; 
+      color: #000000;
+      box-shadow: 0 0 12px rgba(255, 204, 0, 0.6);
+    }
+    button.wide    { grid-column: span 3; }
+    button.wide2   { grid-column: span 2; }
     #status {
-      margin-top: 1.5rem; 
-      font-size: 0.9rem;
+      margin-top: 1.4rem; 
+      font-size: 0.82rem;
       color: #009036; 
-      font-family: monospace;
-      padding: 8px;
-      border-radius: 4px;
-      background: rgba(0, 144, 54, 0.05);
+      min-height: 1.2em; 
+      text-align: center;
+      font-weight: 600;
     }
-    .eagle-icon { font-size: 2.5rem; margin-bottom: 0.5rem; }
   </style>
 </head>
 <body>
-  <div class="container">
-    <div class="eagle-icon">🦅</div>
-    <h1>EAGLES CTRL</h1>
-    
-    <div class="grid">
-      <!-- PIVOT TURNS -->
-      <div class="label">── Pivot ──</div>
-      <button class="special" onclick="cmd('pivotleft')">↺ L</button>
-      <button class="stop" onclick="cmd('stop')">STOP</button>
-      <button class="special" onclick="cmd('pivotright')">↻ R</button>
+  <h1>🦅 EAGLES CTRL</h1>
 
-      <!-- MOVEMENT -->
-      <div class="label">── Movement ──</div>
-      <button onclick="cmd('bigleft')">◀ BIG</button>
-      <button class="special" onclick="cmd('forward')">▲ FWD</button>
-      <button onclick="cmd('bigright')">BIG ▶</button>
-
-      <button onclick="cmd('left')">◀ L</button>
-      <button onclick="cmd('stand')">STAND</button>
-      <button onclick="cmd('right')">R ▶</button>
-
-      <button class="wide special" onclick="cmd('backward')">▼ BACKWARD</button>
-    </div>
-
-    <div id="status">System Ready</div>
+  <!-- MOVEMENT CONTROL -->
+  <div class="grid">
+    <button class="blue"   onclick="cmd('pivotleft')">◀ LEFT</button>
+    <button class="danger" onclick="cmd('stop')">✕ STOP</button>
+    <button class="blue"   onclick="cmd('pivotright')">▶ RIGHT</button>
+    <button class="wide" onclick="cmd('forward')">▲ FWD</button>
+    <button class="wide" onclick="cmd('backward')">▼ BACKWARD</button>
   </div>
 
+  <!-- STANCE -->
+  <div class="grid">
+    <button class="wide" onclick="cmd('stand')">⬛ STAND</button>
+  </div>
+
+  <div id="status">ready</div>
   <script>
     async function cmd(action) {
-      const status = document.getElementById('status');
-      status.textContent = 'Executing: ' + action;
+      document.getElementById('status').textContent = action + '...';
       try {
         const r = await fetch('/' + action);
-        const text = await r.text();
-        status.textContent = 'Status: ' + text;
+        document.getElementById('status').textContent = await r.text();
       } catch(e) {
-        status.textContent = 'Error: ' + e;
-        status.style.color = '#ff4444';
+        document.getElementById('status').textContent = 'error: ' + e;
       }
     }
   </script>

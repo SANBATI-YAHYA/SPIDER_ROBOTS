@@ -4,9 +4,9 @@
 #include <WiFiUdp.h>
 
 // USER CONFIG
-const char *WIFI_SSID = "Nyx";
-const char *WIFI_PASSWORD = "a123456a";
-const char *SERVER_IP = "10.231.28.10";
+const char *WIFI_SSID = "EAGLES";
+const char *WIFI_PASSWORD = "EAGLES06";
+const char *SERVER_IP = "192.168.137.1";
 const uint16_t VIDEO_PORT = 5005;
 const uint16_t CAM_PORT = 5007;
 

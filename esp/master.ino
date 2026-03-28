@@ -4,16 +4,28 @@
 #ifdef ESP32
 #include <WiFi.h>
 #include <WebServer.h>
+#include <HTTPClient.h>
 WebServer server(80);
 #else
 #include <ESP8266WiFi.h>
 #include <ESP8266WebServer.h>
+#include <ESP8266HTTPClient.h>
 ESP8266WebServer server(80);
 #endif
 
 // ── WiFi credentials ─────────────────────────────────────────────────────────
 const char *SSID     = "EAGLES";
 const char *PASSWORD = "EAGLES06";
+
+// ── ESP32-CAM configuration (color detection) ─────────────────────────────────
+// ⚠️  IMPORTANT: Set CAMERA_IP to your ESP32-CAM's actual IP address!
+// To find it, upload a simple WiFi scanner to ESP32-CAM or check your router.
+// Format: "192.168.1.XXX" where XXX is the camera's IP number
+const char *CAMERA_IP = "192.168.137.139"; // ← Change this to your ESP32-CAM IP
+const uint16_t CAMERA_PORT = 80;
+String colorDetectMode = "off";            // "off", "red", "green", "yellow"
+unsigned long lastColorCheck = 0;
+#define COLOR_CHECK_INTERVAL 500            // Check camera every 500ms
 
 // ── PCA9685 ──────────────────────────────────────────────────────────────────
 Adafruit_PWMServoDriver pwm = Adafruit_PWMServoDriver(0x40);
@@ -207,62 +219,7 @@ void moveBackward() {
   phaseB_back();
 }
 
-// =============================================================================
-//  BIG TURN RIGHT — arcs while turning (renamed from turnRight)
-//  Good for wide turns. Calls standUp() between repeats → causes arc movement.
-// =============================================================================
 
-void bigTurnRight() {
-  setServo(CH_FLB, S_FLB - LIFT);
-  setServo(CH_BRB, S_BRB + LIFT);
-  delay(150);
-  setServo(CH_FLT, S_FLT + TURN_STEP);
-  setServo(CH_BRT, G_BRT + TURN_STEP);   // 145+35=180 ok
-  delay(PHASE_DELAY);
-  setServo(CH_FLB, S_FLB);
-  setServo(CH_BRB, S_BRB);
-  delay(150);
-
-  setServo(CH_FRB, S_FRB - LIFT);
-  setServo(CH_BLB, S_BLB + LIFT);
-  delay(150);
-  setServo(CH_FRT, S_FRT - TURN_STEP);
-  setServo(CH_BLT, S_BLT - TURN_STEP);
-  delay(PHASE_DELAY);
-  setServo(CH_FRB, S_FRB);
-  setServo(CH_BLB, S_BLB);
-  delay(150);
-
-  standUp();
-}
-
-// =============================================================================
-//  BIG TURN LEFT — arcs while turning (renamed from turnLeft)
-// =============================================================================
-
-void bigTurnLeft() {
-  setServo(CH_FLB, S_FLB - LIFT);
-  setServo(CH_BRB, S_BRB + LIFT);
-  delay(150);
-  setServo(CH_FLT, S_FLT - TURN_STEP); 
-  setServo(CH_BRT, G_BRT - TURN_STEP); 
-  delay(PHASE_DELAY);
-  setServo(CH_FLB, S_FLB);
-  setServo(CH_BRB, S_BRB);
-  delay(150);
-
-  setServo(CH_FRB, S_FRB - LIFT);
-  setServo(CH_BLB, S_BLB + LIFT);
-  delay(150);
-  setServo(CH_FRT, S_FRT + TURN_STEP);
-  setServo(CH_BLT, S_BLT + TURN_STEP);
-  delay(PHASE_DELAY);
-  setServo(CH_FRB, S_FRB);
-  setServo(CH_BLB, S_BLB);
-  delay(150);
-
-  standUp();
-}
 
 // =============================================================================
 //  PIVOT RIGHT — true in-place spin
@@ -343,6 +300,51 @@ void pivotLeft() {
   // ── Reset hips only ───────────────────────────────────────────────────────
   resetHips();
   delay(100);
+}
+
+// =============================================================================
+//  COLOR DETECTION (from ESP32-CAM)
+// =============================================================================
+
+void handleColorDetection() {
+  // This function checks the camera for detected colors and triggers movement
+  if (colorDetectMode == "off") return;
+  
+  // Only check every COLOR_CHECK_INTERVAL ms to avoid overload
+  if (millis() - lastColorCheck < COLOR_CHECK_INTERVAL) return;
+  lastColorCheck = millis();
+
+  HTTPClient http;
+  String cameraURL = "http://" + String(CAMERA_IP) + "/detect";  // Camera endpoint
+  
+  http.begin(cameraURL);
+  int httpCode = http.GET();
+  
+  if (httpCode == 200) {
+    String response = http.getString();
+    Serial.println("Camera response: " + response);
+    
+    // Parse color from camera response (assumes format: "RED", "GREEN", "YELLOW", "NONE")
+    if (response.indexOf("RED") >= 0 && colorDetectMode == "red") {
+      walkMode = "forward";
+      Serial.println("DETECT: RED → MOVING FORWARD");
+    } 
+    else if (response.indexOf("GREEN") >= 0 && colorDetectMode == "green") {
+      walkMode = "left";
+      Serial.println("DETECT: GREEN → MOVING LEFT");
+    } 
+    else if (response.indexOf("YELLOW") >= 0 && colorDetectMode == "yellow") {
+      walkMode = "right";
+      Serial.println("DETECT: YELLOW → MOVING RIGHT");
+    }
+    else if (response.indexOf("NONE") >= 0) {
+      walkMode = "stop";
+      standUp();
+    }
+  } else {
+    Serial.println("Camera connection failed: " + String(httpCode));
+  }
+  http.end();
 }
 
 // =============================================================================
@@ -442,23 +444,24 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     <h1>EAGLES CTRL</h1>
     
     <div class="grid">
-      <!-- PIVOT TURNS -->
-      <div class="label">── Pivot ──</div>
-      <button class="special" onclick="cmd('pivotleft')">↺ L</button>
-      <button class="stop" onclick="cmd('stop')">STOP</button>
-      <button class="special" onclick="cmd('pivotright')">↻ R</button>
-
-      <!-- MOVEMENT -->
+      <!-- MOVEMENT CONTROL -->
       <div class="label">── Movement ──</div>
-      <button onclick="cmd('bigleft')">◀ BIG</button>
-      <button class="special" onclick="cmd('forward')">▲ FWD</button>
-      <button onclick="cmd('bigright')">BIG ▶</button>
+      <button class="special" onclick="cmd('pivotleft')">◀ LEFT</button>
+      <button class="stop" onclick="cmd('stop')">STOP</button>
+      <button class="special" onclick="cmd('pivotright')">▶ RIGHT</button>
+      <button class="wide" onclick="cmd('forward')">▲ FWD</button>
+      <button class="wide" onclick="cmd('backward')">▼ BACKWARD</button>
 
-      <button onclick="cmd('left')">◀ L</button>
-      <button onclick="cmd('stand')">STAND</button>
-      <button onclick="cmd('right')">R ▶</button>
+      <!-- STANCE -->
+      <div class="label">── Stance ──</div>
+      <button class="wide" onclick="cmd('stand')">STAND</button>
 
-      <button class="wide special" onclick="cmd('backward')">▼ BACKWARD</button>
+      <!-- COLOR DETECTION -->
+      <div class="label">── Color Detect ──</div>
+      <button class="wide special" onclick="cmd('coloron')">🔴 RED ON</button>
+      <button class="wide special" onclick="cmd('colorgreen')">🟢 GREEN ON</button>
+      <button class="wide special" onclick="cmd('coloryellow')">🔵 YELLOW ON</button>
+      <button class="wide stop" onclick="cmd('coloroff')">⊘ DETECT OFF</button>
     </div>
 
     <div id="status">System Ready</div>
@@ -492,11 +495,32 @@ void handleRight()      { walkMode = "right";    server.send(200, "text/plain", 
 void handleBackward()   { walkMode = "backward"; server.send(200, "text/plain", "moving backward"); }
 void handleStop()       { walkMode = "stop"; standUp(); server.send(200, "text/plain", "stopped"); }
 void handleStand()      { walkMode = "stop"; standUp(); server.send(200, "text/plain", "standing"); }
-void handleBigLeft()    { walkMode = "bigleft";    server.send(200, "text/plain", "big turn left"); }
-void handleBigRight()   { walkMode = "bigright";   server.send(200, "text/plain", "big turn right"); }
 void handlePivotRight() { walkMode = "pivotright"; server.send(200, "text/plain", "pivot right"); }
 void handlePivotLeft()  { walkMode = "pivotleft";  server.send(200, "text/plain", "pivot left"); }
 void handleNotFound()   { server.send(404, "text/plain", "not found"); }
+
+// ── Color Detection Mode Handlers ───────────────────────────────────────────
+void handleColorOn() {
+  colorDetectMode = "red";
+  server.send(200, "text/plain", "color detection ON (red)");
+}
+
+void handleColorGreen() {
+  colorDetectMode = "green";
+  server.send(200, "text/plain", "color detection ON (green)");
+}
+
+void handleColorYELLOW() {
+  colorDetectMode = "yellow";
+  server.send(200, "text/plain", "color detection ON (YELLOW)");
+}
+
+void handleColorOff() {
+  colorDetectMode = "off";
+  walkMode = "stop";
+  standUp();
+  server.send(200, "text/plain", "color detection OFF");
+}
 
 // =============================================================================
 //  SETUP & LOOP
@@ -526,10 +550,12 @@ void setup() {
   server.on("/backward",  handleBackward);
   server.on("/stop",      handleStop);
   server.on("/stand",     handleStand);
-  server.on("/bigleft",   handleBigLeft);
-  server.on("/bigright",  handleBigRight);
   server.on("/pivotright",handlePivotRight);
   server.on("/pivotleft", handlePivotLeft);
+  server.on("/coloron",   handleColorOn);
+  server.on("/colorgreen", handleColorGreen);
+  server.on("/colorYELLOW", handleColorYELLOW);
+  server.on("/coloroff",  handleColorOff);
   server.onNotFound(handleNotFound);
   server.begin();
   Serial.println(F("Web server started"));
@@ -537,12 +563,16 @@ void setup() {
 
 void loop() {
   server.handleClient();
-  if      (walkMode == "forward")    moveLeft();
+  
+  // Check for color detection if mode is enabled
+  if (colorDetectMode != "off") {
+    handleColorDetection();
+  }
+  
+  if      (walkMode == "forward")    moveForward();
   else if (walkMode == "left")       moveLeft();
   else if (walkMode == "right")      moveRight();
   else if (walkMode == "backward")   moveBackward();
-  else if (walkMode == "bigleft")    bigTurnLeft();
-  else if (walkMode == "bigright")   bigTurnRight();
   else if (walkMode == "pivotleft")  pivotLeft();
   else if (walkMode == "pivotright") pivotRight();
   delay(2);

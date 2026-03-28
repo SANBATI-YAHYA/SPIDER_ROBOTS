@@ -14,10 +14,11 @@ from math import hypot
 try:
     from vision_engine import VisionDetector, DetectionResult
     DETECTOR_AVAILABLE = True
-except ImportError:
-    DETECTOR_AVAILABLE = False
+except (ImportError, FileNotFoundError, OSError) as e:
+    DETECTOR_AVAILABLE = False  
     logging.warning(
-        "vision_engine.py not found — RAW display mode. "
+        f"Vision engine unavailable ({type(e).__name__}) — RAW display mode. "
+        "Install: pip install pyzbar python-bidi pillow OR disable run_detector"
     )
 
 logging.basicConfig(
@@ -29,9 +30,9 @@ log = logging.getLogger("LaptopControl")
 DETECT_COLORS: Optional[List[str]] = ["red", "green", "yellow"]
 DETECT_CODES:  Optional[List[str]] = ["QRCODE"]
 
-CAM_RESOLUTION: int = 8
-CAM_FRAMERATE:  int = 15
-CAM_QUALITY:    int = 20
+CAM_RESOLUTION: int = 5
+CAM_FRAMERATE:  int = 30
+CAM_QUALITY:    int = 1
 
 MAGIC_VIDEO     = b'\xAA\xBB'
 MAGIC_CMD       = b'\xCC\xDD'
@@ -51,6 +52,7 @@ CMD_FOLLOW    = 0x04
 CMD_TURN      = 0x05
 CMD_SCAN_REFLECTIONS = 0x06
 CMD_SET_FLASH_N = 0x10
+CMD_SET_FLASH = 0x11
 CMD_ESTOP     = 0xFF
 
 ANNOUNCE_PORT = 4999   # master broadcasts "QUAD:<ip>" here every 3 s
@@ -76,7 +78,8 @@ class RobotTelemetry:
 
 @dataclass
 class ServerConfig:
-    host:            str   = "192.168.137.45"
+    host:            str   = "192.168.137.1"
+
     video_port:      int   = 5005       # ESP32-CAM → PC
     master_port:     int   = 5006       # PC ↔ ESP32 Master
     cam_port:        int   = 5007       # PC → ESP32-CAM
@@ -108,10 +111,20 @@ class ArucoColorStore:
         considered "co-located" with a marker.  Tune per your camera FOV.
     """
 
-    def __init__(self, max_dist_px: int = 120):
+    def __init__(self, max_dist_px: int = 120, file_path: str = "aruco_map.json"):
         self.max_dist_px = max_dist_px
+        self._file_path = file_path
         self._pairs: dict[int, str] = {}       # aruco_id → color
         self._lock  = threading.Lock()
+
+        if os.path.exists(self._file_path):
+            try:
+                import json
+                with open(self._file_path, "r") as f:
+                    data = json.load(f)
+                    self._pairs = {int(k): v for k, v in data.items()}
+            except Exception as e:
+                log.warning(f"Could not load {self._file_path}: {e}")
 
     @property
     def pairs(self) -> dict:
@@ -154,6 +167,14 @@ class ArucoColorStore:
                         f"(dist={best_dist:.1f}px)"
                     )
                 # else: already bound — silently skip
+
+        if new_pairs:
+            try:
+                import json
+                with open(self._file_path, "w") as f:
+                    json.dump(self._pairs, f)
+            except Exception as e:
+                log.warning(f"Failed to save {self._file_path}: {e}")
 
         return new_pairs
 
@@ -208,7 +229,7 @@ class LaptopControlServer:
 
         self.detector = None
         if config.run_detector and DETECTOR_AVAILABLE:
-            self.detector = VisionDetector(min_area=800, draw_overlay=True, on_detection=self._on_detection)
+            self.detector = VisionDetector(min_area=800, draw_overlay=True, max_objects=1, on_detection=self._on_detection)
 
         self.aruco_color_store = ArucoColorStore(max_dist_px=120)
 
@@ -289,6 +310,20 @@ class LaptopControlServer:
     def cmd_set_speed(self, speed):       self.send_master_command(CMD_SET_SPEED, struct.pack("!f",   speed))
     def cmd_scan_reflections(self):       self.send_cam_command(CMD_SCAN_REFLECTIONS)
     def cmd_set_flash_n(self, n: int):    self.send_cam_command(CMD_SET_FLASH_N, struct.pack("!B", n))
+    def cmd_set_flash(self, state: int):  self.send_cam_command(CMD_SET_FLASH, struct.pack("!B", state))
+
+    def cmd_take_picture(self, filename: Optional[str] = None) -> bool:
+        with self._frame_lock:
+            pic = self._latest_raw.copy() if self._latest_raw is not None else None
+        
+        if pic is not None:
+            if not filename:
+                os.makedirs("debug_logs", exist_ok=True)
+                filename = os.path.join("debug_logs", f"snapshot_{int(time.time()*1000)}.jpg")
+            cv2.imwrite(filename, pic)
+            log.info(f"Captured image to {filename}")
+            return True
+        return False
 
     # ── Discovery ────────────────────────────────────────────────────────────
 
@@ -404,7 +439,9 @@ class LaptopControlServer:
 
         now = time.time()
         if self._last_frame_time:
-            self._display_fps = 0.9 * self._display_fps + 0.1 * (1.0 / max(now - self._last_frame_time, 1e-6))
+            dt = max(now - self._last_frame_time, 0.001)  # Avoid division by zero
+            fps = 1.0 / dt
+            self._display_fps = 0.9 * self._display_fps + 0.1 * fps
         self._last_frame_time = now
 
         with self._frame_lock:
@@ -448,7 +485,7 @@ class LaptopControlServer:
         if self.on_detection: self.on_detection(result)
 
     def _window_loop(self):
-        WIN = "Laptop | P=Pic Q=Quit S=1Scan F=Flash +/-=Rate"
+        WIN = "Laptop | P=Pic L=Flash Q=Quit S=1Scan F=AutoFlash +/-=Rate"
         cv2.namedWindow(WIN, cv2.WINDOW_NORMAL)
         cv2.resizeWindow(WIN, 800, 600)
         ph = np.zeros((480, 640, 3), dtype=np.uint8)
@@ -492,15 +529,9 @@ class LaptopControlServer:
                     log.info(f"Auto-flash every {self._auto_flash_n} frames")
                     self.cmd_set_flash_n(self._auto_flash_n)
             elif key in (ord('p'), ord('P')):
-                with self._frame_lock:
-                    pic = self._latest_raw.copy() if getattr(self, '_latest_raw', None) is not None else None
-                if pic is not None:
-                    os.makedirs("debug_logs", exist_ok=True)
-                    fname = os.path.join("debug_logs", f"cam_debug_{int(time.time()*1000)}.jpg")
-                    cv2.imwrite(fname, pic)
-                    log.info(f"Saved picture to {fname}")
-                else:
-                    log.warning("No picture available to save yet.")
+                self.cmd_take_picture()
+            elif key in (ord('l'), ord('L')):
+                self.cmd_set_flash(2) # Toggle flash
             time.sleep(0.008)
 
         cv2.destroyAllWindows()
@@ -521,11 +552,31 @@ class LaptopControlServer:
             self._last_stats_time = now
 
 if __name__ == "__main__":
-    cfg = ServerConfig(host="0.0.0.0", video_port=5005, master_port=5006, cam_port=5007, show_window=True, run_detector=True)
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # LAPTOP CONTROL SERVER - Configuration
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # Listen on all interfaces (0.0.0.0) on ports:
+    #   - 5005: Video from ESP32-CAM
+    #   - 5006: Telemetry from Master ESP32
+    #   - 5007: Send commands to ESP32-CAM
+    # 
+    # ESP32 Devices must be configured to send to laptop IP on these ports
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    
+    cfg = ServerConfig(
+        host="0.0.0.0",           # Listen on all interfaces
+        video_port=5005,          # ESP32-CAM video stream
+        master_port=5006,         # Master telemetry
+        cam_port=5007,            # Commands to camera
+        show_window=True,         # Display video window
+        run_detector=False        # Disable vision detection (set True if pyzbar installed)
+    )
+    
     server = LaptopControlServer(cfg)
 
     def my_detection_hook(result):
-        # log any newly formed ArUco↔color pairs
+        """Called when color/ArUco detection happens."""
+        # Log any newly formed ArUco↔color pairs
         new = server.aruco_color_store.register(result)
         for aid, color in new:
             log.info(f"Stored pair → ArUco #{aid} ↔ {color}  | all pairs: {server.aruco_color_store.pairs}")
@@ -533,14 +584,26 @@ if __name__ == "__main__":
         if result.blobs:
             biggest = max(result.blobs, key=lambda b: b.area)
             if biggest.color == "red":
-                server.cmd_turn(1.0)
+                server.cmd_turn(1.0)     # Spin right
             elif biggest.color == "yellow":
-                server.cmd_turn(-1.0)
+                server.cmd_turn(-1.0)    # Spin left
             elif biggest.color == "green":
-                server.cmd_move(1.0, 0.0, 0.0)
+                server.cmd_move(1.0, 0.0, 0.0)  # Move forward
         else:
             server.cmd_stop()
 
     server.on_detection = my_detection_hook
-    log.info("Server starting — waiting for ESP32 devices...")
+    log.info("")
+    log.info("╔══════════════════════════════════════════════════════════════════╗")
+    log.info("║  LAPTOP CONTROL SERVER STARTING                                 ║")
+    log.info("║  Waiting for ESP32 devices on ports 5005/5006/5007...            ║")
+    log.info("║                                                                  ║")
+    log.info("║  Device Configuration Required:                                 ║")
+    log.info("║  ├─ Master ESP32: Send telemetry to laptop:5006                 ║")
+    log.info("║  └─ ESP32-CAM: Send video to laptop:5005, listen on :5007       ║")
+    log.info("║                                                                  ║")
+    log.info("║  Keys: P=Picture, L=Flash, S=Scan, F=AutoFlash, +/-=Rate, Q=Quit║")
+    log.info("╚══════════════════════════════════════════════════════════════════╝")
+    log.info("")
+    
     server.start()
