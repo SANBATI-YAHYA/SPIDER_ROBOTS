@@ -15,7 +15,7 @@ from typing import Callable, List, Optional, Tuple
 try:
     from pyzbar import pyzbar
     PYZBAR_AVAILABLE = True
-except ImportError:
+except (ImportError, FileNotFoundError, OSError):
     PYZBAR_AVAILABLE = False
 
 log = logging.getLogger("Vision")
@@ -79,7 +79,7 @@ DRAW_COLOR = {
 
 
 # ── Dataclasses ──────────────────────────────────────────────────────────────
-@dataclass(slots=True)
+@dataclass
 class ColorBlob:
     color: str
     color_id: int           # maps to protocol.ObjColor
@@ -93,7 +93,7 @@ class ColorBlob:
     distance_cm: Optional[float]
 
 
-@dataclass(slots=True)
+@dataclass
 class CodeResult:
     kind: str
     data: str
@@ -101,7 +101,7 @@ class CodeResult:
     bbox: Tuple[int, int, int, int]
 
 
-@dataclass(slots=True)
+@dataclass
 class ArUcoResult:
     id: int
     center: Tuple[int, int]

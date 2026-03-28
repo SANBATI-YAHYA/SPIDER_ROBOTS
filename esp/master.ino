@@ -1,366 +1,549 @@
-#include <Adafruit_PWMServoDriver.h>
-#include <WiFi.h>
-#include <WiFiUdp.h>
 #include <Wire.h>
-#include <math.h>
+#include <Adafruit_PWMServoDriver.h>
 
-const char *WIFI_SSID = "Helios";
-const char *WIFI_PASSWORD = "a123456a";
-const char *SERVER_IP = "10.221.49.10";
-const uint16_t TELEMETRY_PORT = 5006;
-const uint16_t MASTER_PORT = 5006;
+#ifdef ESP32
+#include <WiFi.h>
+#include <WebServer.h>
+WebServer server(80);
+#else
+#include <ESP8266WiFi.h>
+#include <ESP8266WebServer.h>
+ESP8266WebServer server(80);
+#endif
 
-const uint8_t MAGIC_CMD[2] = {0xCC, 0xDD};
-const uint8_t MAGIC_SENSOR[2] = {0xEE, 0xFF};
+// ── WiFi credentials ─────────────────────────────────────────────────────────
+const char *SSID     = "EAGLES";
+const char *PASSWORD = "EAGLES06";
 
-// Commands
-const uint8_t CMD_MOVE = 0x01;
-const uint8_t CMD_STOP = 0x02;
-const uint8_t CMD_SET_SPEED = 0x03;
-const uint8_t CMD_FOLLOW = 0x04;
-const uint8_t CMD_TURN = 0x05;
-const uint8_t CMD_ESTOP = 0xFF;
-
-// PCA9685 Config
-#define SDA_PIN 21
-#define SCL_PIN 22
+// ── PCA9685 ──────────────────────────────────────────────────────────────────
 Adafruit_PWMServoDriver pwm = Adafruit_PWMServoDriver(0x40);
 
-#define SERVOMIN 150 // Minimum pulse length count out of 4096 (0 degrees)
-#define SERVOMAX 600 // Maximum pulse length count out of 4096 (180 degrees)
+// ── Pulse limits ─────────────────────────────────────────────────────────────
+#define SERVO_MIN 102
+#define SERVO_MAX 512
 
-WiFiUDP udp;
+// ── Channel assignments ───────────────────────────────────────────────────────
+#define CH_FLT 0
+#define CH_FLB 2
+#define CH_FRT 4
+#define CH_FRB 6
+#define CH_BRT 8
+#define CH_BRB 10
+#define CH_BLT 12
+#define CH_BLB 14
 
-float readBEFloat(const uint8_t *buf) {
-  uint32_t raw = ((uint32_t)buf[0] << 24) | ((uint32_t)buf[1] << 16) |
-                 ((uint32_t)buf[2] << 8) | (uint32_t)buf[3];
-  float f;
-  memcpy(&f, &raw, sizeof(f));
-  return f;
+// ── Stand angles ──────────────────────────────────────────────────────────────
+#define S_FLT 100
+#define S_FLB 121
+#define S_FRT 115
+#define S_FRB 107
+#define S_BRT 165   // real stand
+#define S_BRB 118
+#define S_BLT 130
+#define S_BLB 127
+
+// ── G_BRT: gait-safe BRT ──────────────────────────────────────────────────────
+// S_BRT=165. 165+25=190 → overflow → pin 10 goes to max (the bug).
+// All gait functions use G_BRT=145 so ±STEP always stays in [120..170].
+#define G_BRT 145
+
+// ── Gait parameters ──────────────────────────────────────────────────────────
+#define STEP        25   // hip swing for walking
+#define LIFT        25   // knee lift for walking
+#define LIFT_BACK   20   // smaller lift for backward (safer for BRB)
+#define TURN_STEP   35   // hip swing for BIG turns (more angle = more arc)
+#define PIVOT_STEP  40   // hip swing for in-place pivot (bigger = faster spin)
+#define PHASE_DELAY 300  // ms between phases
+
+// ── Walk mode ─────────────────────────────────────────────────────────────────
+String walkMode = "stop";
+
+// =============================================================================
+//  LOW-LEVEL
+// =============================================================================
+
+uint16_t angleToPulse(int angle) {
+  return map(constrain(angle, 0, 180), 0, 180, SERVO_MIN, SERVO_MAX);
 }
 
-// OOP Architecture Modeled for 8DOF Spider
-class Leg {
-private:
-  uint8_t hip_idx, knee_idx;
-  float L1, L2; // Link lengths in mm
-  bool inverted;
-  float offset_hip, offset_knee;
+void setServo(uint8_t ch, int angle) {
+  angle = constrain(angle, 0, 180);
+  pwm.setPWM(ch, 0, angleToPulse(angle));
+  Serial.printf("  ch%-2d = %d deg\n", ch, angle);
+}
 
-public:
-  Leg(uint8_t hip, uint8_t knee, float l1, float l2, bool inv)
-      : hip_idx(hip), knee_idx(knee), L1(l1), L2(l2), inverted(inv) {
-    offset_hip = 90.0;
-    offset_knee = 90.0;
-  }
+// Reset only hips to stand (used inside pivot — avoids full standUp drift)
+void resetHips() {
+  setServo(CH_FLT, S_FLT);
+  setServo(CH_FRT, S_FRT);
+  setServo(CH_BRT, S_BRT);
+  setServo(CH_BLT, S_BLT);
+}
 
-  void setAngles(float hip_deg, float knee_deg) {
-    if (inverted) {
-      hip_deg = 180.0 - hip_deg;
-      knee_deg = 180.0 - knee_deg;
+// =============================================================================
+//  STAND
+// =============================================================================
+
+void standUp() {
+  Serial.println(F("=== STAND ==="));
+  setServo(CH_FLT, S_FLT);
+  setServo(CH_FLB, S_FLB);
+  setServo(CH_FRT, S_FRT);
+  setServo(CH_FRB, S_FRB);
+  setServo(CH_BRT, S_BRT);   // 165 real stand
+  setServo(CH_BRB, S_BRB);
+  setServo(CH_BLT, S_BLT);
+  setServo(CH_BLB, S_BLB);
+  delay(PHASE_DELAY);
+}
+
+// =============================================================================
+//  MOVE LEFT  (= forward for this robot)
+//  Diagonal pairs: FL+BR | FR+BL
+// =============================================================================
+
+void phaseA() {
+  setServo(CH_FLT, S_FLT + STEP);
+  setServo(CH_FLB, S_FLB - LIFT);
+  setServo(CH_BRT, G_BRT - STEP);      // 145-25=120 safe
+  setServo(CH_BRB, S_BRB + LIFT);
+  setServo(CH_FRT, S_FRT - STEP);
+  setServo(CH_FRB, S_FRB);
+  setServo(CH_BLT, S_BLT + STEP);
+  setServo(CH_BLB, S_BLB);
+  delay(PHASE_DELAY);
+}
+
+void phaseB() {
+  setServo(CH_FRT, S_FRT + STEP);
+  setServo(CH_FRB, S_FRB - LIFT);
+  setServo(CH_BLT, S_BLT - STEP);
+  setServo(CH_BLB, S_BLB + LIFT);
+  setServo(CH_FLT, S_FLT - STEP);
+  setServo(CH_FLB, S_FLB);
+  setServo(CH_BRT, G_BRT + STEP);      // 145+25=170 safe
+  setServo(CH_BRB, S_BRB);
+  delay(PHASE_DELAY);
+}
+
+void moveLeft() {
+  Serial.println(F("=== MOVE LEFT ==="));
+  phaseA();
+  phaseB();
+}
+
+// =============================================================================
+//  MOVE RIGHT  (mirror of left)
+// =============================================================================
+
+void phaseA_right() {
+  setServo(CH_FLT, S_FLT - STEP);
+  setServo(CH_FLB, S_FLB - LIFT);
+  setServo(CH_BRT, G_BRT + STEP);      // 145+25=170 safe
+  setServo(CH_BRB, S_BRB + LIFT);
+  setServo(CH_FRT, S_FRT + STEP);
+  setServo(CH_FRB, S_FRB);
+  setServo(CH_BLT, S_BLT - STEP);
+  setServo(CH_BLB, S_BLB);
+  delay(PHASE_DELAY);
+}
+
+void phaseB_right() {
+  setServo(CH_FRT, S_FRT - STEP);
+  setServo(CH_FRB, S_FRB - LIFT);
+  setServo(CH_BLT, S_BLT + STEP);
+  setServo(CH_BLB, S_BLB + LIFT);
+  setServo(CH_FLT, S_FLT + STEP);
+  setServo(CH_FLB, S_FLB);
+  setServo(CH_BRT, G_BRT - STEP);      // 145-25=120 safe
+  setServo(CH_BRB, S_BRB);
+  delay(PHASE_DELAY);
+}
+
+void moveRight() {
+  Serial.println(F("=== MOVE RIGHT ==="));
+  phaseA_right();
+  phaseB_right();
+}
+
+// =============================================================================
+//  MOVE BACKWARD
+// =============================================================================
+
+void phaseA_back() {
+  // Reset knees first to prevent BRB lock
+  setServo(CH_FLB, S_FLB); setServo(CH_FRB, S_FRB);
+  setServo(CH_BRB, S_BRB); setServo(CH_BLB, S_BLB);
+  delay(80);
+  setServo(CH_FLT, S_FLT - STEP);
+  setServo(CH_FLB, S_FLB - LIFT_BACK);
+  setServo(CH_BRT, G_BRT + STEP);      // 145+25=170 safe
+  setServo(CH_BRB, S_BRB + LIFT_BACK);
+  setServo(CH_FRT, S_FRT + STEP);
+  setServo(CH_FRB, S_FRB);
+  setServo(CH_BLT, S_BLT - STEP);
+  setServo(CH_BLB, S_BLB);
+  delay(PHASE_DELAY);
+}
+
+void phaseB_back() {
+  setServo(CH_FLB, S_FLB); setServo(CH_FRB, S_FRB);
+  setServo(CH_BRB, S_BRB); setServo(CH_BLB, S_BLB);
+  delay(80);
+  setServo(CH_FRT, S_FRT - STEP);
+  setServo(CH_FRB, S_FRB - LIFT_BACK);
+  setServo(CH_BLT, S_BLT + STEP);
+  setServo(CH_BLB, S_BLB + LIFT_BACK);
+  setServo(CH_FLT, S_FLT + STEP);
+  setServo(CH_FLB, S_FLB);
+  setServo(CH_BRT, G_BRT - STEP);      // 145-25=120 safe
+  setServo(CH_BRB, S_BRB);
+  delay(PHASE_DELAY);
+}
+
+void moveBackward() {
+  Serial.println(F("=== BACKWARD ==="));
+  phaseA_back();
+  phaseB_back();
+}
+
+// =============================================================================
+//  BIG TURN RIGHT — arcs while turning (renamed from turnRight)
+//  Good for wide turns. Calls standUp() between repeats → causes arc movement.
+// =============================================================================
+
+void bigTurnRight() {
+  setServo(CH_FLB, S_FLB - LIFT);
+  setServo(CH_BRB, S_BRB + LIFT);
+  delay(150);
+  setServo(CH_FLT, S_FLT + TURN_STEP);
+  setServo(CH_BRT, G_BRT + TURN_STEP);   // 145+35=180 ok
+  delay(PHASE_DELAY);
+  setServo(CH_FLB, S_FLB);
+  setServo(CH_BRB, S_BRB);
+  delay(150);
+
+  setServo(CH_FRB, S_FRB - LIFT);
+  setServo(CH_BLB, S_BLB + LIFT);
+  delay(150);
+  setServo(CH_FRT, S_FRT - TURN_STEP);
+  setServo(CH_BLT, S_BLT - TURN_STEP);
+  delay(PHASE_DELAY);
+  setServo(CH_FRB, S_FRB);
+  setServo(CH_BLB, S_BLB);
+  delay(150);
+
+  standUp();
+}
+
+// =============================================================================
+//  BIG TURN LEFT — arcs while turning (renamed from turnLeft)
+// =============================================================================
+
+void bigTurnLeft() {
+  setServo(CH_FLB, S_FLB - LIFT);
+  setServo(CH_BRB, S_BRB + LIFT);
+  delay(150);
+  setServo(CH_FLT, S_FLT - TURN_STEP); 
+  setServo(CH_BRT, G_BRT - TURN_STEP); 
+  delay(PHASE_DELAY);
+  setServo(CH_FLB, S_FLB);
+  setServo(CH_BRB, S_BRB);
+  delay(150);
+
+  setServo(CH_FRB, S_FRB - LIFT);
+  setServo(CH_BLB, S_BLB + LIFT);
+  delay(150);
+  setServo(CH_FRT, S_FRT + TURN_STEP);
+  setServo(CH_BLT, S_BLT + TURN_STEP);
+  delay(PHASE_DELAY);
+  setServo(CH_FRB, S_FRB);
+  setServo(CH_BLB, S_BLB);
+  delay(150);
+
+  standUp();
+}
+
+// =============================================================================
+//  PIVOT RIGHT — true in-place spin
+//
+//  Key difference vs BIG TURN:
+//  - NO standUp() between diagonal phases → no drift/translation
+//  - resetHips() only at end of full cycle
+//  - Both diagonal pairs swing in OPPOSITE directions
+//    so the net linear force = 0, only rotational force remains
+//
+//  If robot spins LEFT instead of RIGHT → swap pivotRight and pivotLeft calls
+//  in the web handlers, or flip the hip directions below.
+// =============================================================================
+
+void pivotRight() {
+  // ── Diagonal A: FL + BR ──────────────────────────────────────────────────
+  // Lift
+  setServo(CH_FLB, S_FLB - LIFT);
+  setServo(CH_BRB, S_BRB + LIFT);
+  delay(150);
+  // Swing: FL backward, BR forward → body rotates CW (right)
+  setServo(CH_FLT, S_FLT - PIVOT_STEP);    // FL hip back
+  setServo(CH_BRT, G_BRT - PIVOT_STEP);    // BR hip forward (145-40=105 safe)
+  delay(PHASE_DELAY);
+  // Place down — do NOT call standUp() here (causes drift)
+  setServo(CH_FLB, S_FLB);
+  setServo(CH_BRB, S_BRB);
+  delay(150);
+
+  // ── Diagonal B: FR + BL ──────────────────────────────────────────────────
+  // Lift
+  setServo(CH_FRB, S_FRB - LIFT);
+  setServo(CH_BLB, S_BLB + LIFT);
+  delay(150);
+  // Swing: FR forward, BL backward → continues CW rotation
+  setServo(CH_FRT, S_FRT + PIVOT_STEP);    // FR hip forward
+  setServo(CH_BLT, S_BLT + PIVOT_STEP);   // BL hip backward
+  delay(PHASE_DELAY);
+  // Place down
+  setServo(CH_FRB, S_FRB);
+  setServo(CH_BLB, S_BLB);
+  delay(150);
+
+  // ── Reset hips only (not full standUp) ───────────────────────────────────
+  resetHips();
+  delay(100);
+}
+
+// =============================================================================
+//  PIVOT LEFT — mirror of pivotRight
+// =============================================================================
+
+void pivotLeft() {
+  // ── Diagonal A: FL + BR ──────────────────────────────────────────────────
+  setServo(CH_FLB, S_FLB - LIFT);
+  setServo(CH_BRB, S_BRB + LIFT);
+  delay(150);
+  // Swing: FL forward, BR backward → body rotates CCW (left)
+  setServo(CH_FLT, S_FLT + PIVOT_STEP);    // FL hip forward
+  setServo(CH_BRT, G_BRT + PIVOT_STEP);    // BR hip backward (145+40=185→180 clamped, ok)
+  delay(PHASE_DELAY);
+  setServo(CH_FLB, S_FLB);
+  setServo(CH_BRB, S_BRB);
+  delay(150);
+
+  // ── Diagonal B: FR + BL ──────────────────────────────────────────────────
+  setServo(CH_FRB, S_FRB - LIFT);
+  setServo(CH_BLB, S_BLB + LIFT);
+  delay(150);
+  // Swing: FR backward, BL forward → continues CCW rotation
+  setServo(CH_FRT, S_FRT - PIVOT_STEP);    // FR hip backward
+  setServo(CH_BLT, S_BLT - PIVOT_STEP);   // BL hip forward
+  delay(PHASE_DELAY);
+  setServo(CH_FRB, S_FRB);
+  setServo(CH_BLB, S_BLB);
+  delay(150);
+
+  // ── Reset hips only ───────────────────────────────────────────────────────
+  resetHips();
+  delay(100);
+}
+
+// =============================================================================
+//  WEB UI
+// =============================================================================
+
+const char INDEX_HTML[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Eagles Controller</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      min-height: 100vh;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      background: #0d0d0d; color: #e8e8e8;
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
     }
-
-    hip_deg = constrain(hip_deg, 0.0, 180.0);
-    knee_deg = constrain(knee_deg, 0.0, 180.0);
-
-    uint16_t hip_pulse = map((long)(hip_deg * 10), 0, 1800, SERVOMIN, SERVOMAX);
-    uint16_t knee_pulse =
-        map((long)(knee_deg * 10), 0, 1800, SERVOMIN, SERVOMAX);
-
-    pwm.setPWM(hip_idx, 0, hip_pulse);
-    pwm.setPWM(knee_idx, 0, knee_pulse);
-  }
-
-  // Advanced 2DOF IK Algorithm:
-  // x: forward/backward relative to shoulder
-  // z: height down relative to shoulder
-  void moveToIK(float x, float z) {
-    float d2 = x * x + z * z;
-    float d = sqrt(d2);
-
-    // IK Bounds Check
-    if (d >= (L1 + L2))
-      d = L1 + L2 - 0.1;
-    if (d <= abs(L1 - L2))
-      d = abs(L1 - L2) + 0.1;
-
-    // Law of cosines setup
-    float alpha1 = atan2(x, z);
-    float alpha2 = acos((L1 * L1 + d * d - L2 * L2) / (2 * L1 * d));
-
-    float hip_angle_rad = alpha1 + alpha2;
-    float knee_angle_rad = acos((L1 * L1 + L2 * L2 - d * d) / (2 * L1 * L2));
-
-    // Convert to degrees and map to servo range (90 offset usually straight
-    // down)
-    float hip_angle = (hip_angle_rad * 180.0 / PI);
-    float knee_angle = (knee_angle_rad * 180.0 / PI);
-
-    setAngles(hip_angle + offset_hip - 90.0, knee_angle + offset_knee - 90.0);
-  }
-};
-
-class Quadruped {
-private:
-  Leg *legs[4];
-  float phase;
-  float frequency;  // gait freq (Hz)
-  float amplitudeX; // stride
-  float amplitudeZ; // step height
-  float zOffset;    // standing height (z down)
-
-  float gaitPhase[4] = {0.0, PI, PI,
-                        0.0}; // Phase offsets for FL, FR, BL, BR (Trot)
-  float dx[4] = {0, 0, 0, 0};
-
-  unsigned long lastTime;
-  bool isMoving;
-
-public:
-  Quadruped() {
-    // Leg layout:
-    // 0,1: Front Left
-    // 2,3: Front Right (inverted)
-    // 4,5: Back Left
-    // 6,7: Back Right (inverted)
-    legs[0] = new Leg(0, 1, 50.0, 50.0, false);
-    legs[1] = new Leg(2, 3, 50.0, 50.0, true);
-    legs[2] = new Leg(4, 5, 50.0, 50.0, false);
-    legs[3] = new Leg(6, 7, 50.0, 50.0, true);
-
-    zOffset = 70.0;
-    phase = 0;
-    frequency = 0;
-    isMoving = false;
-    lastTime = millis();
-  }
-
-  void setup() {
-    Wire.begin(SDA_PIN, SCL_PIN);
-    pwm.begin();
-    pwm.setPWMFreq(50);
-    stand();
-  }
-
-  void stand() {
-    isMoving = false;
-    for (int i = 0; i < 4; i++) {
-      legs[i]->moveToIK(0, zOffset);
+    .container {
+      background: #1a1a1a;
+      padding: 2rem;
+      border-radius: 15px;
+      box-shadow: 0 0 20px rgba(0, 144, 54, 0.2);
+      border: 1px solid #009036;
+      text-align: center;
     }
-  }
+    h1 { 
+      font-size: 1.8rem; 
+      letter-spacing: 0.1em; 
+      margin-bottom: 1.5rem; 
+      color: #009036; 
+      display: flex; align-items: center; justify-content: center; gap: 10px;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 12px;
+      width: 300px;
+    }
+    .label {
+      grid-column: span 3;
+      font-size: 0.75rem;
+      color: #009036;
+      text-align: center;
+      margin: 1rem 0 0.5rem 0;
+      text-transform: uppercase;
+      font-weight: bold;
+      opacity: 0.7;
+    }
+    button {
+      padding: 1.2rem 0.5rem; 
+      font-size: 0.9rem; 
+      font-weight: 600;
+      border: 2px solid #009036; 
+      border-radius: 8px;
+      background: transparent; 
+      color: #009036;
+      cursor: pointer; 
+      transition: all 0.2s ease;
+    }
+    button:active {
+      transform: scale(0.95);
+      background: #009036;
+      color: #0d0d0d;
+    }
+    button.special {
+      background: rgba(0, 144, 54, 0.1);
+    }
+    button.stop {
+      border-color: #ff4444;
+      color: #ff4444;
+    }
+    button.stop:active {
+      background: #ff4444;
+      color: white;
+    }
+    button.wide { grid-column: span 3; }
+    #status {
+      margin-top: 1.5rem; 
+      font-size: 0.9rem;
+      color: #009036; 
+      font-family: monospace;
+      padding: 8px;
+      border-radius: 4px;
+      background: rgba(0, 144, 54, 0.05);
+    }
+    .eagle-icon { font-size: 2.5rem; margin-bottom: 0.5rem; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="eagle-icon">🦅</div>
+    <h1>EAGLES CTRL</h1>
+    
+    <div class="grid">
+      <!-- PIVOT TURNS -->
+      <div class="label">── Pivot ──</div>
+      <button class="special" onclick="cmd('pivotleft')">↺ L</button>
+      <button class="stop" onclick="cmd('stop')">STOP</button>
+      <button class="special" onclick="cmd('pivotright')">↻ R</button>
 
-  // Preset Functions mapped for intuitive motion triggering
-  void walkForward() {
-    isMoving = true;
-    frequency = 1.0;
-    amplitudeX = 25.0;
-    amplitudeZ = 20.0;
-    dx[0] = 1.0;
-    dx[1] = 1.0;
-    dx[2] = 1.0;
-    dx[3] = 1.0;
-  }
+      <!-- MOVEMENT -->
+      <div class="label">── Movement ──</div>
+      <button onclick="cmd('bigleft')">◀ BIG</button>
+      <button class="special" onclick="cmd('forward')">▲ FWD</button>
+      <button onclick="cmd('bigright')">BIG ▶</button>
 
-  void walkBackward() {
-    isMoving = true;
-    frequency = 1.0;
-    amplitudeX = 25.0;
-    amplitudeZ = 20.0;
-    dx[0] = -1.0;
-    dx[1] = -1.0;
-    dx[2] = -1.0;
-    dx[3] = -1.0;
-  }
+      <button onclick="cmd('left')">◀ L</button>
+      <button onclick="cmd('stand')">STAND</button>
+      <button onclick="cmd('right')">R ▶</button>
 
-  void turnLeft() {
-    isMoving = true;
-    frequency = 1.0;
-    amplitudeX = 20.0;
-    amplitudeZ = 20.0;
-    dx[0] = -1.0;
-    dx[2] = -1.0;
-    dx[1] = 1.0;
-    dx[3] = 1.0;
-  }
+      <button class="wide special" onclick="cmd('backward')">▼ BACKWARD</button>
+    </div>
 
-  void turnRight() {
-    isMoving = true;
-    frequency = 1.0;
-    amplitudeX = 20.0;
-    amplitudeZ = 20.0;
-    dx[0] = 1.0;
-    dx[2] = 1.0;
-    dx[1] = -1.0;
-    dx[3] = -1.0;
-  }
+    <div id="status">System Ready</div>
+  </div>
 
-  void strafeLeft() {
-    // 2DOF pseudo-strafe using gait offsets
-    isMoving = true;
-    frequency = 1.0;
-    amplitudeX = 10.0;
-    amplitudeZ = 25.0; // Higher steps for clearance
-    dx[0] = 0.5;
-    dx[2] = -0.5;
-    dx[1] = -0.5;
-    dx[3] = 0.5;
-  }
-
-  void strafeRight() {
-    isMoving = true;
-    frequency = 1.0;
-    amplitudeX = 10.0;
-    amplitudeZ = 25.0;
-    dx[0] = -0.5;
-    dx[2] = 0.5;
-    dx[1] = 0.5;
-    dx[3] = -0.5;
-  }
-
-  void update() {
-    unsigned long now = millis();
-    float dt = (now - lastTime) / 1000.0f;
-    lastTime = now;
-
-    if (isMoving) {
-      phase += 2.0 * PI * frequency * dt;
-      if (phase > 2.0 * PI)
-        phase -= 2.0 * PI;
-
-      for (int i = 0; i < 4; i++) {
-        float p = phase + gaitPhase[i];
-        // x follows sine wave, z lifts only during swing phase (when cos(p) >
-        // 0)
-        float x = amplitudeX * dx[i] * sin(p);
-        float zLift = (cos(p) > 0) ? (amplitudeZ * cos(p)) : 0;
-        float z = zOffset - zLift;
-
-        legs[i]->moveToIK(x, z);
+  <script>
+    async function cmd(action) {
+      const status = document.getElementById('status');
+      status.textContent = 'Executing: ' + action;
+      try {
+        const r = await fetch('/' + action);
+        const text = await r.text();
+        status.textContent = 'Status: ' + text;
+      } catch(e) {
+        status.textContent = 'Error: ' + e;
+        status.style.color = '#ff4444';
       }
     }
-  }
-};
+  </script>
+</body>
+</html>
+)rawliteral";
 
-Quadruped spider;
+// =============================================================================
+//  WEB SERVER HANDLERS
 
-void sendTelemetry() {
-  uint8_t buf[20];
-  buf[0] = MAGIC_SENSOR[0];
-  buf[1] = MAGIC_SENSOR[1];
+void handleRoot()       { server.send(200, "text/html",  INDEX_HTML); }
+void handleForward()    { walkMode = "forward";  server.send(200, "text/plain", "moving forward"); }
+void handleLeft()       { walkMode = "left";     server.send(200, "text/plain", "moving left"); }
+void handleRight()      { walkMode = "right";    server.send(200, "text/plain", "moving right"); }
+void handleBackward()   { walkMode = "backward"; server.send(200, "text/plain", "moving backward"); }
+void handleStop()       { walkMode = "stop"; standUp(); server.send(200, "text/plain", "stopped"); }
+void handleStand()      { walkMode = "stop"; standUp(); server.send(200, "text/plain", "standing"); }
+void handleBigLeft()    { walkMode = "bigleft";    server.send(200, "text/plain", "big turn left"); }
+void handleBigRight()   { walkMode = "bigright";   server.send(200, "text/plain", "big turn right"); }
+void handlePivotRight() { walkMode = "pivotright"; server.send(200, "text/plain", "pivot right"); }
+void handlePivotLeft()  { walkMode = "pivotleft";  server.send(200, "text/plain", "pivot left"); }
+void handleNotFound()   { server.send(404, "text/plain", "not found"); }
 
-  float ts_stamp = millis() / 1000.0f;
-  uint32_t raw_ts;
-  memcpy(&raw_ts, &ts_stamp, sizeof(raw_ts));
-
-  buf[2] = (raw_ts >> 24) & 0xFF;
-  buf[3] = (raw_ts >> 16) & 0xFF;
-  buf[4] = (raw_ts >> 8) & 0xFF;
-  buf[5] = raw_ts & 0xFF;
-
-  buf[6] = 0;
-  buf[7] = 0;
-  memset(buf + 8, 0, 12);
-
-  udp.beginPacket(SERVER_IP, TELEMETRY_PORT);
-  udp.write(buf, sizeof(buf));
-  udp.endPacket();
-}
-
-void receiveCommands() {
-  int packetSize = udp.parsePacket();
-  if (packetSize <= 0)
-    return;
-
-  uint8_t buf[256];
-  int len = udp.read(buf, sizeof(buf));
-  if (len < 5)
-    return;
-
-  if (buf[0] != MAGIC_CMD[0] || buf[1] != MAGIC_CMD[1])
-    return;
-
-  uint8_t cmdId = buf[2];
-  uint16_t payloadLen = ((uint16_t)buf[3] << 8) | buf[4];
-  const uint8_t *payload = buf + 5;
-
-  switch (cmdId) {
-  case CMD_MOVE: {
-    if (payloadLen < 12)
-      break;
-    float vx = readBEFloat(payload);
-    float vy = readBEFloat(payload + 4);
-    float vz = readBEFloat(payload + 8);
-
-    // Simplistic mapping of vx, vy to Quadruped preset IK functions
-    if (vx > 0.5)
-      spider.walkForward();
-    else if (vx < -0.5)
-      spider.walkBackward();
-    else if (vy > 0.5)
-      spider.strafeRight();
-    else if (vy < -0.5)
-      spider.strafeLeft();
-    else
-      spider.stand();
-
-    Serial.printf(">> [CMD] MOVE  vx=%.3f  vy=%.3f\n", vx, vy);
-    break;
-  }
-  case CMD_STOP:
-    spider.stand();
-    Serial.println(">> [CMD] STOP");
-    break;
-  case CMD_ESTOP:
-    spider.stand();
-    Serial.println(">> [CMD] EMERGENCY STOP");
-    break;
-  case CMD_TURN: {
-    if (payloadLen < 4)
-      break;
-    float yawRate = readBEFloat(payload);
-    if (yawRate > 0.1)
-      spider.turnRight();
-    else if (yawRate < -0.1)
-      spider.turnLeft();
-    else
-      spider.stand();
-    Serial.printf(">> [CMD] TURN  yaw_rate=%.3f\n", yawRate);
-    break;
-  }
-  case CMD_FOLLOW: {
-    // Advanced logic placeholder
-    spider.walkForward();
-    break;
-  }
-  default:
-    break;
-  }
-}
+// =============================================================================
+//  SETUP & LOOP
+// =============================================================================
 
 void setup() {
   Serial.begin(115200);
+  Serial.println(F("\n=== Spider Robot Boot ==="));
 
-  Serial.println("\n[INIT] Starting PCA and Servos...");
-  spider.setup();
+  pwm.begin();
+  pwm.setOscillatorFrequency(27000000);
+  pwm.setPWMFreq(50);
+  delay(100);
 
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
-  }
-  Serial.println("\n[NET] Connected!");
+  standUp();
+  delay(1000);
 
-  udp.begin(MASTER_PORT);
+  WiFi.begin(SSID, PASSWORD);
+  Serial.print(F("Connecting to WiFi"));
+  while (WiFi.status() != WL_CONNECTED) { delay(500); Serial.print('.'); }
+  Serial.printf("\nConnected! IP: %s\n", WiFi.localIP().toString().c_str());
+
+  server.on("/",          handleRoot);
+  server.on("/forward",   handleForward);
+  server.on("/left",      handleLeft);
+  server.on("/right",     handleRight);
+  server.on("/backward",  handleBackward);
+  server.on("/stop",      handleStop);
+  server.on("/stand",     handleStand);
+  server.on("/bigleft",   handleBigLeft);
+  server.on("/bigright",  handleBigRight);
+  server.on("/pivotright",handlePivotRight);
+  server.on("/pivotleft", handlePivotLeft);
+  server.onNotFound(handleNotFound);
+  server.begin();
+  Serial.println(F("Web server started"));
 }
 
 void loop() {
-  static uint32_t lastTelem = 0;
-  if (millis() - lastTelem >= 1000) {
-    sendTelemetry();
-    lastTelem = millis();
-  }
-
-  receiveCommands();
-  spider.update();
-  delay(10); // Loop pacing
+  server.handleClient();
+  if      (walkMode == "forward")    moveLeft();
+  else if (walkMode == "left")       moveLeft();
+  else if (walkMode == "right")      moveRight();
+  else if (walkMode == "backward")   moveBackward();
+  else if (walkMode == "bigleft")    bigTurnLeft();
+  else if (walkMode == "bigright")   bigTurnRight();
+  else if (walkMode == "pivotleft")  pivotLeft();
+  else if (walkMode == "pivotright") pivotRight();
+  delay(2);
 }

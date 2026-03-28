@@ -73,7 +73,7 @@ class RobotTelemetry:
 
 @dataclass
 class ServerConfig:
-    host:            str   = "10.221.49.10"
+    host:            str   = "192.168.137.45"
     video_port:      int   = 5005       # ESP32-CAM → PC
     master_port:     int   = 5006       # PC ↔ ESP32 Master
     cam_port:        int   = 5007       # PC → ESP32-CAM
