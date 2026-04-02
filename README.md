@@ -1,30 +1,48 @@
-# SRG ENSAM Rabat Competition Achievements
+# 🕷️ SRG ENSAM Rabat Competition - Spider Robot Project 🕷️
 
-This document outlines the accomplishments of our team during the SRG ENSAM Rabat competition, focusing on our innovative approaches in spider robot technology.
+This document outlines the accomplishments and technical details of our spider robot developed for the **SRG ENSAM Rabat** competition.
 
-## Achievements Overview
+## 🚀 Achievements Overview
 
-Our team successfully implemented various functionalities in our spider robot, enhancing its capability to perform complex tasks in real-time environments. The key achievements include:
+Our team successfully implemented advanced functionalities, enabling the spider robot to perform complex tasks in real-time environments:
 
-### 1. Image Detection
-- Utilized advanced computer vision algorithms to enable the spider robot to detect and recognize various objects and obstacles in its environment.
+### 1. 👁️ Image Detection & Processing
+- Utilized **OpenCV** and AI models to detect and recognize objects.
+- Real-time image capture and processing for autonomous navigation.
 
-### 2. Color Extraction
-- Implemented color detection algorithms that allow the spider robot to identify and extract specific colors, including:
-  - **Red**: Used for identifying targets or specific objects.
-  - **Green**: Recognized for environmental interaction purposes.
-  - **Blue, Yellow, etc.**: Additional color detections for extended functionality.
+### 2. 🎨 Color Extraction
+- **Red**: Identification of target markers or danger zones 🔴.
+- **Green**: Identification of safe paths or task completion zones 🟢.
+- **HSV Filtering**: Robust detection under varying light conditions.
 
-### 3. Shape Detection
-- Deployed shape recognition capabilities to identify geometric figures, which included:
-  - **Square**: Used for navigation and object interaction.
-  - **Triangle**: Utilized in various task-specific scenarios.
+### 3. 📐 Shape Recognition
+- **Square**: Detection of specific competition containers ⬛.
+- **Triangle**: Identification of direction signs or checkpoints 🔺.
 
-### 4. QR Code Processing
-- Integrated QR code scanning and processing, allowing the spider robot to interact with QR codes for data retrieval or task execution.
+### 4. 📲 QR Code Processing
+- Integrated scanner to decode instructions or log data instantly.
 
-## Conclusion
+---
 
-Through these functionalities, our spider robot demonstrated significant versatility and efficiency in performing the assigned tasks during the competition. With further development, these capabilities can be expanded to cover more sophisticated operations in future competitions and applications.
+## 🛠️ Materials & Hardware
+- **Controller**: Raspberry Pi 4B (4GB RAM) 🍓.
+- **Actuators**: 18x LX-224HV High-voltage Serial Bus Servos.
+- **Vision**: 2DOF High-definition Camera 📷.
+- **Sensors**: Ultrasonic distance sensor for obstacle avoidance 🦇.
+- **Power**: 11.1V 2500mAh High-voltage Lipo Battery 🔋.
 
-![Spider Robot](link_to_spider_robot_image)
+## 🔌 Circuit & Architecture
+- **Central Hub**: Raspberry Pi connected to a dedicated Servo Expansion Board.
+- **Connectivity**: Servos daisy-chained via serial bus to minimize wiring complexity.
+- **Communication**: I2C for ultrasonic sensor and USB/CSI for the camera module.
+
+## ⚙️ Methodology
+1. **Kinematics**: Inverse kinematics used for smooth 6-legged gait control.
+2. **Vision Pipeline**: Frame capture -> HSV conversion -> Gaussian Blur -> Contour Detection -> Shape/Color filtering.
+3. **Control Loop**: Real-time feedback from sensors adjusting the walking gait dynamically.
+
+---
+
+![Spider Robot](https://www.hiwonder.com/cdn/shop/products/1_11_794d934f-0f66-419b-986c-54a8b79b69b3.jpg?v=1626084050)
+
+*Developed with passion for the SRG ENSAM Rabat Robotics Competition.*
