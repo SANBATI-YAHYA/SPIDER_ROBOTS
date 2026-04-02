@@ -1,6 +1,6 @@
-# 🕷️ SRG ENSAM Rabat Competition - Spider Robot Project 🕷️
+# 🕷️ SRG ENSAM AGADIR Competition - Spider Robot Project 🕷️
 
-This document outlines the accomplishments and technical details of our spider robot developed for the **SRG ENSAM Rabat** competition.
+This document outlines the accomplishments and technical details of our spider robot developed for the **SRG ENSAM AGADIR** competition.
 
 ## 🚀 Achievements Overview
 
@@ -43,6 +43,54 @@ Our team successfully implemented advanced functionalities, enabling the spider 
 
 ---
 
-![Spider Robot](https://www.hiwonder.com/cdn/shop/products/1_11_794d934f-0f66-419b-986c-54a8b79b69b3.jpg?v=1626084050)
+![Spider Robot](image.png)
 
-*Developed with passion for the SRG ENSAM Rabat Robotics Competition.*
+---
+
+## 📁 Project File Structure
+
+### Root Directory Files
+- **README.md** - Main project documentation and overview
+- **ENGINEERING.md** - Detailed engineering documentation and technical specifications
+- **INTEGRATION_GUIDE.md** - Integration instructions and setup guide
+- **MASTER.ino** - Main Arduino sketch for the Raspberry Pi control system
+- **cam-flash.ino** - Camera flash control Arduino sketch
+- **laptop_control.py** - Python script for laptop-based remote control interfacing
+- **robot_ctrl.py** - Main Python module for robot control logic and command interface
+- **vision_engine.py** - Computer vision module using OpenCV for image processing and object detection
+- **testing.py** - Test suite for validating robot functionality and vision algorithms
+- **image.png** - Project image/diagram
+- **hhhh.html** - HTML documentation or test file
+- **.python-version** - Python version specification file
+- **.gitignore** - Git ignore rules for version control
+- **.git/** - Git repository folder
+
+### /esp/ Folder - ESP/Arduino Sketches
+Contains embedded system code for distributed controllers:
+- **master.ino** - Master controller sketch for main ESP board
+- **cam.ino** - Camera module control sketch
+- **camera_color_detector.ino** - Specialized color detection sketch for camera operations
+- **spider_master.ino.bak** - Backup of original spider master controller sketch
+
+### /server/ Folder - Server-Side Code
+- **color_detector.py** - Server-side color detection algorithm and image processing
+
+### /__pycache__/ Folder
+Python cache directory for compiled bytecode
+
+---
+
+## 🔧 Quick Reference: File Purposes
+
+| File | Purpose |
+|------|---------|
+| vision_engine.py | Core computer vision pipeline |
+| robot_ctrl.py | Robot movement and control commands |
+| color_detector.py | Color detection logic for navigation |
+| master.ino | Primary control firmware |
+| laptop_control.py | Remote control interface |
+| testing.py | Automated testing suite |
+
+---
+
+*Developed with passion for the SRG ENSAM AGADIR Robotics Competition.*
